@@ -16,7 +16,7 @@ Backend adapters are separate packages that depend on this core:
 
 Each adapter is built into a single-file bundle that includes this core, the backend SDK, and all transitive dependencies. The bundle is committed to the adapter repo at `dist/server.bundle.js` and shipped to members inside the bootstrap zip. See `filesystem-adapter-spec.md` in `agent-index-meta-docs` for the full adapter packaging and distribution specification.
 
-The MCP server runs locally on each member's machine as a child process of Cowork. It authenticates to the remote storage backend using per-member credentials stored at `~/.agent-index/credentials/`.
+The MCP server runs locally on each member's machine as a child process of Cowork. It authenticates to the remote storage backend using per-member credentials stored at `.agent-index/credentials/` within the project directory. This location is used because the project directory persists across Cowork sessions (it's mounted from the host), while `~/` is ephemeral within the sandbox. The credential store path is configurable via `auth.credential_store` in `agent-index.json`.
 
 ## Configuration
 
@@ -33,7 +33,7 @@ The MCP server reads its configuration from `agent-index.json`, located via the 
     },
     "auth": {
       "method": "per-member",
-      "credential_store": "~/.agent-index/credentials/"
+      "credential_store": ".agent-index/credentials/"
     },
     "connection": { }
   }
@@ -416,7 +416,7 @@ OAuth-based adapters (Google Drive, OneDrive) must handle token lifecycle transp
 
 ### Token Storage
 
-Credentials are stored as JSON at `{credential_store}/{backend}.json` (e.g., `~/.agent-index/credentials/gdrive.json`). The file contains the full token set: `access_token`, `refresh_token`, `expiry_date`, `token_type`, and any backend-specific fields.
+Credentials are stored as JSON at `{credential_store}/{backend}.json` (e.g., `.agent-index/credentials/gdrive.json` relative to the project root). The file contains the full token set: `access_token`, `refresh_token`, `expiry_date`, `token_type`, and any backend-specific fields.
 
 ### Silent Token Refresh
 

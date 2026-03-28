@@ -1,5 +1,5 @@
 import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 
 /**
@@ -43,9 +43,21 @@ export async function loadConfig() {
     throw new Error('Config missing "remote_filesystem.auth"');
   }
 
-  // Resolve credential store path (expand ~)
-  const credentialStore = (rf.auth.credential_store || '~/.agent-index/credentials/')
-    .replace(/^~/, homedir());
+  // Resolve credential store path.
+  // Paths starting with ~ are expanded to the user's home directory.
+  // Relative paths (e.g., ".agent-index/credentials/") are resolved against the
+  // project root (the directory containing agent-index.json). This is the expected
+  // default in Cowork, where ~ is ephemeral but the project directory persists.
+  const rawCredentialStore = rf.auth.credential_store || '.agent-index/credentials/';
+  let credentialStore;
+  if (rawCredentialStore.startsWith('~')) {
+    credentialStore = rawCredentialStore.replace(/^~/, homedir());
+  } else if (rawCredentialStore.startsWith('/')) {
+    credentialStore = rawCredentialStore;
+  } else {
+    // Relative path — resolve against the project root (config file's directory)
+    credentialStore = resolve(dirname(resolvedPath), rawCredentialStore);
+  }
 
   return {
     backend: rf.backend,
