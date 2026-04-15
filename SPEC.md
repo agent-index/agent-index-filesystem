@@ -1,12 +1,12 @@
-# Agent Index Filesystem — MCP Server Interface Specification
+# Agent Index Filesystem — Tool Interface Specification
 
 Version: 1.0.0
 
 ## Overview
 
-The Agent Index Filesystem (AIFS) MCP server provides a backend-agnostic interface for reading and writing files on a remote filesystem. It exposes a fixed set of tools that Claude calls through the MCP protocol. Each backend adapter (Google Drive, OneDrive, S3) implements these tools using the appropriate storage API.
+The Agent Index Filesystem (AIFS) tools provide a backend-agnostic interface for reading and writing files on a remote filesystem. They are available as built-in tools in Cowork and can be called directly in exec mode. The same interface is implemented by backend adapters (Google Drive, OneDrive, S3) to handle the actual storage operations.
 
-This package (`@agent-index/filesystem`) contains the core framework: MCP server, tool definitions, config loader, and typed errors. It is a development dependency only — adapter developers import from it, and the bundler compiles it into the adapter's self-contained `dist/server.bundle.js`. This package is never distributed to end users.
+This package (`@agent-index/filesystem`) contains the core framework: tool interface definitions, config loader, typed errors, and the `BackendAdapter` contract. It is a development foundation for adapter developers — adapter developers import from it to implement the `BackendAdapter` interface against their respective storage services.
 
 Backend adapters are separate packages that depend on this core:
 
@@ -14,23 +14,16 @@ Backend adapters are separate packages that depend on this core:
 - `@agent-index/filesystem-onedrive` — Microsoft OneDrive/SharePoint adapter
 - `@agent-index/filesystem-s3` — Amazon S3 adapter
 
-Each adapter is built into a single-file bundle that includes this core, the backend SDK, and all transitive dependencies. The bundle is committed to the adapter repo at `dist/server.bundle.js` and shipped to members inside the bootstrap zip. See `filesystem-adapter-spec.md` in `agent-index-meta-docs` for the full adapter packaging and distribution specification.
-
-The MCP server runs locally on each member's machine as a child process of Cowork. It authenticates to the remote storage backend using per-member credentials stored at `.agent-index/credentials/` within the project directory. This location is used because the project directory persists across Cowork sessions (it's mounted from the host), while `~/` is ephemeral within the sandbox. The credential store path is configurable via `auth.credential_store` in `agent-index.json`.
+Each adapter provides an implementation of the backend-specific operations. Credentials are stored locally at `.agent-index/credentials/` within the project directory. This location is used because the project directory persists across Cowork sessions (it's mounted from the host), while `~/` is ephemeral within the sandbox. The credential store path is configurable via `auth.credential_store` in `agent-index.json`.
 
 ## Configuration
 
-The MCP server reads its configuration from `agent-index.json`, located via the `AIFS_CONFIG_PATH` environment variable. It uses the `remote_filesystem` section:
+The tools read their configuration from `agent-index.json`, located in the current working directory or specified via environment variable. The tools use the `remote_filesystem` section:
 
 ```json
 {
   "remote_filesystem": {
     "backend": "gdrive",
-    "mcp_server": {
-      "adapter": "gdrive",
-      "adapter_version": "1.0.0",
-      "bundle_path": "mcp-servers/filesystem/server.bundle.js"
-    },
     "auth": {
       "method": "per-member",
       "credential_store": ".agent-index/credentials/"
@@ -40,7 +33,7 @@ The MCP server reads its configuration from `agent-index.json`, located via the 
 }
 ```
 
-The `connection` object is backend-specific and is passed directly to the backend adapter. It never contains secrets — only endpoint identifiers (bucket names, drive IDs, OAuth client IDs).
+The `connection` object is backend-specific and is used by the adapter implementation. It never contains secrets — only endpoint identifiers (bucket names, drive IDs, OAuth client IDs).
 
 ## Tool Definitions
 
@@ -424,7 +417,7 @@ Access tokens are short-lived (typically 1 hour for Google). Adapters must handl
 
 1. **Library-level auto-refresh:** The OAuth client library (e.g., `google-auth-library`) automatically refreshes expired access tokens when a valid refresh token is present. Adapters should enable this by setting credentials on the client during initialization.
 
-2. **Persistence on refresh:** Adapters must listen for token refresh events (e.g., the `tokens` event on Google's `OAuth2Client`) and write the new tokens to the credential file immediately. This ensures refreshed tokens survive MCP server restarts. The listener must merge new tokens with existing ones to preserve the refresh token (refresh events may only include the new access token and expiry).
+2. **Persistence on refresh:** Adapters must listen for token refresh events (e.g., the `tokens` event on Google's `OAuth2Client`) and write the new tokens to the credential file immediately. This ensures refreshed tokens are available to subsequent invocations. The listener must merge new tokens with existing ones to preserve the refresh token (refresh events may only include the new access token and expiry).
 
 3. **Retry on 401:** Despite library-level auto-refresh, edge cases (race conditions, clock skew, stale cached tokens) can produce 401 errors. Adapters must wrap all backend API calls with a retry mechanism that catches 401 errors, attempts a manual token refresh, and retries the operation exactly once. If the retry also fails, the error propagates.
 
@@ -468,7 +461,7 @@ interface BackendAdapter {
 }
 ```
 
-Adapters throw typed errors (e.g., `FileNotFoundError`, `NotAuthenticatedError`) which the MCP server translates into the standard error response format.
+Adapters throw typed errors (e.g., `FileNotFoundError`, `NotAuthenticatedError`) which the executor translates into the standard error response format.
 
 ### Additional Adapter Requirements
 

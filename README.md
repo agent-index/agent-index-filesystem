@@ -1,21 +1,20 @@
 # agent-index-filesystem
 
-Core MCP server framework for the agent-index remote filesystem. Defines the `aifs_*` tool interface, configuration loader, typed errors, and the `BackendAdapter` contract that all storage adapters implement.
+Core framework for the agent-index remote filesystem. Defines the `aifs_*` tool interface, configuration loader, typed errors, and the `BackendAdapter` contract that all storage adapters implement.
 
-This is a **development dependency only** — adapter developers import from it, and the bundler compiles it into each adapter's self-contained `dist/server.bundle.js`. This package is never distributed to end users.
+The `aifs_*` tools are available as built-in tools in Cowork and can be called directly in exec mode. This package serves as a reference implementation and development foundation for adapter developers — the backend adapter implementations consume this package to implement the `BackendAdapter` contract against their respective storage services.
 
 ## What's in This Package
 
 | Module | Purpose |
 |---|---|
-| `src/server.js` | MCP server setup, tool definitions (9 `aifs_*` tools), request routing |
 | `src/config.js` | Loads and validates `agent-index.json` configuration |
 | `src/errors.js` | Typed error classes (`FileNotFoundError`, `AccessDeniedError`, etc.) |
 | `src/index.js` | Library exports for adapter packages |
 
 ## Tool Interface
 
-The MCP server exposes 9 tools that Claude calls through the MCP protocol:
+The `aifs_*` tools are available as built-in tools in Cowork and can be invoked directly in exec mode. These 9 tools provide the remote filesystem interface:
 
 | Tool | Description |
 |---|---|
@@ -31,7 +30,7 @@ The MCP server exposes 9 tools that Claude calls through the MCP protocol:
 
 ## Backend Adapter Contract
 
-Each adapter implements the `BackendAdapter` interface:
+Each adapter implements the `BackendAdapter` interface to provide implementation of the `aifs_*` tools for a specific storage backend:
 
 ```typescript
 interface BackendAdapter {
@@ -57,9 +56,8 @@ interface BackendAdapter {
 
 ## Related Documentation
 
-- `SPEC.md` — Full MCP server interface specification
-- `agent-index-meta-docs/filesystem-adapter-spec.md` — Adapter packaging, bundling, and distribution specification
-- `agent-index-meta-docs/remote-filesystem-migration-plan.md` — Architecture and migration design
+- `SPEC.md` — Full `aifs_*` tool interface specification
+- `agent-index-meta-docs/filesystem-adapter-spec.md` — Adapter implementation and distribution specification
 
 ## License
 
