@@ -1,6 +1,6 @@
 {
   "name": "@agent-index/filesystem",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Agent Index Filesystem MCP Server — core framework, tool definitions, and adapter interface",
   "type": "module",
   "main": "src/index.js",

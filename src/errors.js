@@ -40,7 +40,9 @@ export class AccessDeniedError extends AifsError {
 
 export class NotAuthenticatedError extends AifsError {
   constructor(reason = 'no_credential') {
-    super('NOT_AUTHENTICATED', `Not authenticated: ${reason}`, { reason });
+    // needs_auth is a top-level flag on the response so callers can branch
+    // on a single boolean instead of pattern-matching the `error` string.
+    super('NOT_AUTHENTICATED', `Not authenticated: ${reason}`, { reason, needs_auth: true });
   }
 }
 
