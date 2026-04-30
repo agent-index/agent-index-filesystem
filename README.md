@@ -14,7 +14,7 @@ The `aifs_*` tools are available as built-in tools in Cowork and can be called d
 
 ## Tool Interface
 
-The `aifs_*` tools are available as built-in tools in Cowork and can be invoked directly in exec mode. These 9 tools provide the remote filesystem interface:
+The `aifs_*` tools are available as built-in tools in Cowork and can be invoked directly in exec mode. As of contract v2.0.0, 14 tools provide the remote filesystem interface (9 core + 5 access-control):
 
 | Tool | Description |
 |---|---|
@@ -27,6 +27,11 @@ The `aifs_*` tools are available as built-in tools in Cowork and can be invoked 
 | `aifs_copy` | Copy a file within the remote filesystem |
 | `aifs_auth_status` | Check current authentication state |
 | `aifs_authenticate` | Initiate or complete the authentication flow |
+| `aifs_share` | Grant a subject (email or group) a role at a path *(v2.0+)* |
+| `aifs_unshare` | Revoke a subject's access at a path *(v2.0+)* |
+| `aifs_get_permissions` | List current ACL entries on a path *(v2.0+)* |
+| `aifs_transfer_ownership` | Transfer ownership (optional per backend) *(v2.0+)* |
+| `aifs_search` | Permission-aware enumeration *(v2.0+)* |
 
 ## Backend Adapter Contract
 
@@ -62,3 +67,13 @@ interface BackendAdapter {
 ## License
 
 Proprietary — Copyright (c) 2026 Agent Index Inc. All rights reserved. See [LICENSE](LICENSE) for details.
+
+## Contract Versions
+
+Adapters declare a `contract_version` in `adapter.json`:
+
+- **`1.0.0`** — original 9 ops (read/write/list/exists/stat/delete/copy/auth_status/authenticate). Backwards compatible.
+- **`2.0.0`** — adds 5 access-control ops, the `if_revision` parameter on `aifs_write`, and a `revision` field in `aifs_stat` returns. Required for the agent-index-core 3.1.0+ access-control model. The gdrive adapter ships v2.0.0 in package version 2.2.0+; OneDrive and S3 adapters retain v1.0.0 until their own implementations land.
+
+See `SPEC.md` for the full operation specifications.
+

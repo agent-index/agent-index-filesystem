@@ -71,3 +71,65 @@ export class BackendError extends AifsError {
     });
   }
 }
+
+// ─── v2.0 errors (access control + revision-aware writes + search) ────
+
+export class RevisionConflictError extends AifsError {
+  constructor(path, expectedRevision, actualRevision) {
+    super(
+      'REVISION_CONFLICT',
+      `Revision mismatch at path: ${path}. Re-read, re-apply changes, and retry.`,
+      { path, expected_revision: expectedRevision, actual_revision: actualRevision }
+    );
+  }
+}
+
+export class InvalidSubjectError extends AifsError {
+  constructor(subject, reason = 'unknown') {
+    super(
+      'INVALID_SUBJECT',
+      `Subject is not a valid identity: ${subject} (${reason})`,
+      { subject, reason }
+    );
+  }
+}
+
+export class InvalidRoleError extends AifsError {
+  constructor(role, validRoles = ['reader', 'commenter', 'writer']) {
+    super(
+      'INVALID_ROLE',
+      `Role "${role}" is not accepted. Valid roles: ${validRoles.join(', ')}`,
+      { role, valid_roles: validRoles }
+    );
+  }
+}
+
+export class InvalidRecipientError extends AifsError {
+  constructor(recipient, reason = 'unknown') {
+    super(
+      'INVALID_RECIPIENT',
+      `Recipient is not a valid identity for ownership transfer: ${recipient} (${reason})`,
+      { recipient, reason }
+    );
+  }
+}
+
+export class InvalidScopeError extends AifsError {
+  constructor(scope, reason = 'unknown') {
+    super(
+      'INVALID_SCOPE',
+      `Search scope is invalid: ${scope} (${reason})`,
+      { scope, reason }
+    );
+  }
+}
+
+export class NotImplementedError extends AifsError {
+  constructor(operation, backend = 'this backend') {
+    super(
+      'NOT_IMPLEMENTED',
+      `Operation "${operation}" is not implemented for ${backend}`,
+      { operation, backend }
+    );
+  }
+}
