@@ -33,8 +33,12 @@ export class PathNotFoundError extends AifsError {
 }
 
 export class AccessDeniedError extends AifsError {
-  constructor(path, action = 'access') {
-    super('ACCESS_DENIED', `Permission denied to ${action}: ${path}`, { path });
+  constructor(path, action = 'access', detail = null) {
+    let message = `Permission denied to ${action}: ${path}`;
+    if (detail) {
+      message += `. ${detail}`;
+    }
+    super('ACCESS_DENIED', message, { path });
   }
 }
 
@@ -131,5 +135,4 @@ export class NotImplementedError extends AifsError {
       `Operation "${operation}" is not implemented for ${backend}`,
       { operation, backend }
     );
-  }
-}
+  }}
