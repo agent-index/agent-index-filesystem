@@ -136,3 +136,13 @@ export class NotImplementedError extends AifsError {
       { operation, backend }
     );
   }}
+
+export class NotProvisionedError extends AifsError {
+  constructor(message = 'Member space is not provisioned', details = {}) {
+    // needs_provision is a top-level flag so callers can branch on one boolean
+    // (mirrors NotAuthenticatedError's needs_auth). Raised when a member's
+    // backing store does not yet exist (e.g. a OneDrive that has never been
+    // signed into) — distinct from FILE_NOT_FOUND for a real missing file.
+    super('NOT_PROVISIONED', message, { needs_provision: true, ...details });
+  }
+}

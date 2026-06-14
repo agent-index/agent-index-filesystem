@@ -30,4 +30,5 @@ export {
   NotEmptyError,
   AuthFailedError,
   BackendError,
+  NotProvisionedError,
 } from './errors.js';
