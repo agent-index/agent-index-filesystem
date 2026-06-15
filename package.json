@@ -1,6 +1,6 @@
 {
   "name": "@agent-index/filesystem",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Agent Index Filesystem MCP Server \u2014 core framework, tool definitions, and adapter interface",
   "type": "module",
   "main": "src/index.js",
@@ -24,6 +24,7 @@
   "author": "Agent Index",
   "license": "SEE LICENSE IN LICENSE",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0"
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "undici": "^6.0.0"
   }
 }

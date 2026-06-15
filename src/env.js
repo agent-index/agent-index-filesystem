@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import tls from 'node:tls';
 import { readFileSync } from 'node:fs';
+import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici';
 
 /**
  * Auto-detect proxy environment and configure Node.js TLS accordingly.
@@ -37,50 +38,66 @@ export function initEnvironment() {
     return;
   }
 
-  // If NODE_EXTRA_CA_CERTS is already set, the user/platform handled it.
-  if (process.env.NODE_EXTRA_CA_CERTS) {
-    return;
-  }
-
-  // Check for a custom override first.
-  const customCaPath = process.env.AIFS_CA_CERT;
-  if (customCaPath) {
-    if (existsSync(customCaPath)) {
-      _addCaCert(customCaPath);
-      return;
+  // Resolve the MITM CA certificate (content), if we need to trust one.
+  // When NODE_EXTRA_CA_CERTS is set, Node's TLS already trusts it globally and
+  // undici's default secure context picks it up — so we leave caCert null and
+  // use the default-TLS proxy dispatcher below.
+  let caCert = null;
+  let caSource = null;
+  if (!process.env.NODE_EXTRA_CA_CERTS) {
+    const customCaPath = process.env.AIFS_CA_CERT;
+    if (customCaPath && !existsSync(customCaPath)) {
+      console.warn(`[aifs] AIFS_CA_CERT set to ${customCaPath} but file not found — skipping.`);
     }
-    console.warn(`[aifs] AIFS_CA_CERT set to ${customCaPath} but file not found — skipping.`);
-    return;
-  }
-
-  // Probe well-known paths.
-  for (const caPath of KNOWN_CA_PATHS) {
-    if (existsSync(caPath)) {
-      _addCaCert(caPath);
-      return;
+    const candidates = customCaPath ? [customCaPath] : KNOWN_CA_PATHS;
+    for (const p of candidates) {
+      if (existsSync(p)) {
+        try { caCert = readFileSync(p, 'utf-8'); caSource = p; break; } catch { /* try next */ }
+      }
     }
   }
 
-  // Proxy detected but no MITM CA found. This may be fine (not all proxies
-  // do TLS interception), but log a note in case requests fail later.
-  console.warn(
-    '[aifs] HTTPS_PROXY is set but no MITM CA certificate found. ' +
-    'If TLS errors occur, set AIFS_CA_CERT or NODE_EXTRA_CA_CERTS to the proxy CA path.'
-  );
+  // (1) Node https/tls clients (google-auth-library / gaxios, etc.) honor
+  //     HTTPS_PROXY themselves; they just need the MITM CA trusted.
+  if (caCert) _addCaCert(caCert, caSource);
+
+  // (2) undici global fetch (the OneDrive adapter and any fetch-based backend)
+  //     does NOT honor HTTPS_PROXY on its own AND does not pick up the
+  //     createSecureContext patch above — so it needs an explicit proxy
+  //     dispatcher, with the MITM CA threaded into requestTls. Without this,
+  //     every fetch dies (EAI_AGAIN / "fetch failed") in a proxied sandbox.
+  //     Validated 2026-06-14 in a live proxied sandbox (bug 20260614-…-odproxy).
+  try {
+    // requestTls.ca REPLACES the trust store, so pass the COMBINED set
+    // (default roots + MITM) — passing the MITM cert alone breaks normal chains.
+    const opts = caCert ? { requestTls: { ca: [...tls.rootCertificates, caCert] } } : {};
+    setGlobalDispatcher(new EnvHttpProxyAgent(opts));
+    console.log(
+      `[aifs] Proxy detected — fetch routed through HTTPS_PROXY` +
+      (caCert ? ` (MITM CA trusted from ${caSource})` : '')
+    );
+  } catch (err) {
+    console.warn(`[aifs] Could not configure proxy dispatcher for fetch: ${err.message}`);
+  }
+
+  if (!caCert && !process.env.NODE_EXTRA_CA_CERTS) {
+    console.warn(
+      '[aifs] HTTPS_PROXY is set but no MITM CA certificate found. ' +
+      'If TLS errors occur, set AIFS_CA_CERT or NODE_EXTRA_CA_CERTS to the proxy CA path.'
+    );
+  }
 }
 
 /**
- * Add a CA certificate to Node's default TLS trust store at runtime.
- * This is equivalent to setting NODE_EXTRA_CA_CERTS but works after
- * process startup.
+ * Add a CA certificate (PEM content) to Node's default TLS trust store at
+ * runtime, for Node https/tls-based clients. Equivalent to NODE_EXTRA_CA_CERTS
+ * but applied after process startup. (undici fetch is handled separately via
+ * the proxy dispatcher in initEnvironment.)
  */
-function _addCaCert(certPath) {
+function _addCaCert(cert, source = 'configured path') {
   try {
-    const cert = readFileSync(certPath, 'utf-8');
-
     // Append to the default CA list rather than replacing it.
-    const defaultCAs = tls.rootCertificates;
-    const combined = [...defaultCAs, cert];
+    const combined = [...tls.rootCertificates, cert];
 
     tls.createSecureContext = ((original) => {
       return function (options = {}) {
@@ -91,8 +108,8 @@ function _addCaCert(certPath) {
       };
     })(tls.createSecureContext);
 
-    console.log(`[aifs] Proxy detected — added CA certificate from ${certPath}`);
+    console.log(`[aifs] Proxy detected — added CA certificate from ${source}`);
   } catch (err) {
-    console.warn(`[aifs] Failed to load CA certificate from ${certPath}: ${err.message}`);
+    console.warn(`[aifs] Failed to apply CA certificate from ${source}: ${err.message}`);
   }
 }
