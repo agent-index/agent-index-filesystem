@@ -72,7 +72,10 @@ export function initEnvironment() {
     // (default roots + MITM) — passing the MITM cert alone breaks normal chains.
     const opts = caCert ? { requestTls: { ca: [...tls.rootCertificates, caCert] } } : {};
     setGlobalDispatcher(new EnvHttpProxyAgent(opts));
-    console.log(
+    // stderr, NOT stdout — exec mode writes byte-exact file content to stdout,
+    // so any diagnostic on stdout corrupts aifs_read in proxied sandboxes
+    // (bug 20260615-8d20ea22-stdoutlog).
+    console.error(
       `[aifs] Proxy detected — fetch routed through HTTPS_PROXY` +
       (caCert ? ` (MITM CA trusted from ${caSource})` : '')
     );
@@ -108,7 +111,7 @@ function _addCaCert(cert, source = 'configured path') {
       };
     })(tls.createSecureContext);
 
-    console.log(`[aifs] Proxy detected — added CA certificate from ${source}`);
+    console.error(`[aifs] Proxy detected — added CA certificate from ${source}`);  // stderr — keep stdout clean for byte-exact reads
   } catch (err) {
     console.warn(`[aifs] Failed to apply CA certificate from ${source}: ${err.message}`);
   }
