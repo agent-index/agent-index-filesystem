@@ -80,22 +80,38 @@ Write content to a path on the remote filesystem. Creates parent directories/fol
     },
     "content": {
       "type": "string",
-      "description": "File content to write (UTF-8 text, or base64-encoded with 'base64:' prefix for binary)"
+      "description": "File content to write inline (UTF-8 text, or base64-encoded with 'base64:' prefix for binary). Carried in the command-line arguments, so bounded by the OS argument limit (about 128 KiB). Use content_file or content_stdin for anything larger."
+    },
+    "content_file": {
+      "type": "string",
+      "description": "Path to a local file whose bytes are the content to write. The executor reads the file directly; there is no size limit. The path is on the machine running the executor, not on the remote filesystem."
+    },
+    "content_stdin": {
+      "type": "boolean",
+      "const": true,
+      "description": "If true, the executor reads the content from standard input. No size limit."
     },
     "encoding": {
       "type": "string",
       "enum": ["utf8", "base64"],
       "default": "utf8",
-      "description": "Optional. If 'base64', content is decoded to binary before upload."
+      "description": "Optional. With inline content: 'base64' means the string is base64 text, which is decoded to binary before upload. With content_file or content_stdin: 'base64' means the payload is taken as raw bytes and stored exactly; without it the payload is decoded as UTF-8 text, which corrupts binary files."
     },
     "if_revision": {
       "type": "string",
       "description": "Optional (v2.0+). Backend revision identifier from a prior aifs_read or aifs_stat. If supplied, the write is rejected with REVISION_CONFLICT when the file's current revision differs. Used for safe concurrent edits to shared state files (activity-log.jsonl, action-items.json). Callers that omit this parameter get the legacy unconditional-write behavior."
     }
   },
-  "required": ["path", "content"]
+  "required": ["path"],
+  "oneOf": [
+    { "required": ["content"] },
+    { "required": ["content_file"] },
+    { "required": ["content_stdin"] }
+  ]
 }
 ```
+
+**Content sources.** Exactly one of `content`, `content_file` or `content_stdin` must be supplied. `content_file` and `content_stdin` are resolved by the executor, which reads the payload and passes it to the adapter as ordinary content, so they add nothing to the `BackendAdapter` contract below: `write(path, content, options)` is unchanged. The gdrive executor (2.6.0+) does not enforce "exactly one": when more than one is supplied it uses the first present of `content`, `content_file`, `content_stdin` and ignores the rest without an error. A `content_file` that cannot be read fails the call with `BACKEND_ERROR`; the message carries the local file error.
 
 **Returns:**
 ```json
