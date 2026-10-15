@@ -14,7 +14,7 @@ The `aifs_*` tools are available as built-in tools in Cowork and can be called d
 
 ## Tool Interface
 
-The `aifs_*` tools are available as built-in tools in Cowork and can be invoked directly in exec mode. As of contract v2.0.0, 14 tools provide the remote filesystem interface (9 core + 5 access-control):
+The `aifs_*` tools are available as built-in tools in Cowork and can be invoked directly in exec mode. As of contract v2.0.0, 16 tools provide the remote filesystem interface (9 core + 5 access-control + 2 optional batch):
 
 | Tool | Description |
 |---|---|
@@ -32,10 +32,12 @@ The `aifs_*` tools are available as built-in tools in Cowork and can be invoked 
 | `aifs_get_permissions` | List current ACL entries on a path *(v2.0+)* |
 | `aifs_transfer_ownership` | Transfer ownership (optional per backend) *(v2.0+)* |
 | `aifs_search` | Permission-aware enumeration *(v2.0+)* |
+| `aifs_write_batch` | Write many files in one process *(optional; gdrive 2.9.0+)* |
+| `aifs_stat_batch` | Get metadata for many paths in one process *(optional; gdrive 2.9.0+)* |
 
 ## Backend Adapter Contract
 
-Each adapter implements the `BackendAdapter` interface to provide implementation of the `aifs_*` tools for a specific storage backend:
+Each adapter implements the `BackendAdapter` interface to provide implementation of the `aifs_*` tools for a specific storage backend. Below is the core of it. The full contract 2.0 interface, with revisions, search, access control and the optional batch methods, is in `SPEC.md` § "Backend Adapter Contract".
 
 ```typescript
 interface BackendAdapter {
