@@ -30,3 +30,11 @@ OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 For licensing inquiries, contact: licensing@agent-index.ai
+
+ADAPTER DEVELOPMENT. Notwithstanding the above, anyone may use, copy and
+modify this library, without a separate agreement, for the purpose of
+building, testing and distributing filesystem adapters for Agent Index that
+implement the Agent Index filesystem adapter contract, and may distribute
+this library unmodified as part of such an adapter. The adapters themselves
+may be licensed under terms of their authors' choice (see the Agent Index
+Collection Exception, section 1a). All other rights are reserved.
