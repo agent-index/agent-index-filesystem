@@ -638,6 +638,104 @@ The `truncated` field indicates whether the result set was capped. When `truncat
 
 ---
 
+### aifs_write_batch
+
+Write many files in one executor process. Optional: an adapter supports it when its manifest lists `writeBatch` in `supported_operations` (gdrive 2.9.0+, advertised from 2.10.0). Callers that don't find it there should fall back to one `aifs_write` per file.
+
+**Input Schema:**
+```json
+{
+  "type": "object",
+  "properties": {
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string", "description": "Path to write, as for aifs_write" },
+          "content": { "type": "string", "description": "Content inline, as for aifs_write" },
+          "content_file": { "type": "string", "description": "Path to a local file whose bytes are the content, as for aifs_write" },
+          "encoding": { "type": "string", "enum": ["utf8", "base64"], "default": "utf8", "description": "As for aifs_write" }
+        },
+        "required": ["path"],
+        "oneOf": [
+          { "required": ["content"] },
+          { "required": ["content_file"] }
+        ]
+      }
+    }
+  },
+  "required": ["entries"]
+}
+```
+
+Each entry takes `content` or `content_file`, never `content_stdin`: standard input is one stream and can't carry many entries. As with `aifs_write`, `content` wins when both are given. An entry with neither, or with no `path`, fails the whole call with `INVALID_ARGS` before anything is written. `if_revision` is not supported per entry.
+
+**Returns:**
+```json
+{
+  "total": 3,
+  "succeeded": 2,
+  "failed": 1,
+  "results": [
+    { "path": "/shared/dist/a.json", "success": true, "revision": "0BxYz..." },
+    { "path": "/shared/dist/b.json", "success": true, "revision": "0BxYa..." },
+    { "path": "/shared/dist/c.json", "success": false, "error": { "code": "ACCESS_DENIED", "message": "..." } }
+  ]
+}
+```
+
+A failed entry does not fail the call. Check `failed` and each entry's `success`. The gdrive adapter creates each distinct parent folder once before writing, so concurrent writes into the same new folder can't create duplicate folders.
+
+**Errors (whole call):**
+- `INVALID_ARGS` — `entries` missing or empty, or an entry without `path` or content
+- `NOT_AUTHENTICATED` — No valid credential
+- `NOT_IMPLEMENTED` — The adapter doesn't support `writeBatch`
+
+---
+
+### aifs_stat_batch
+
+Get metadata for many paths in one executor process. Optional: an adapter supports it when its manifest lists `statBatch` in `supported_operations` (gdrive 2.9.0+, advertised from 2.10.0).
+
+**Input Schema:**
+```json
+{
+  "type": "object",
+  "properties": {
+    "paths": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string" },
+      "description": "Paths to get metadata for"
+    }
+  },
+  "required": ["paths"]
+}
+```
+
+**Returns:**
+```json
+{
+  "total": 3,
+  "results": [
+    { "path": "/shared/dist/a.json", "exists": true, "id": "1AbC...", "name": "a.json", "size": 1024, "mimeType": "application/json", "md5": "9e107d9d...", "revision": "0BxYz..." },
+    { "path": "/shared/dist/b.json", "exists": false },
+    { "path": "/shared/dist/c.json", "success": false, "error": { "code": "BACKEND_ERROR", "message": "..." } }
+  ]
+}
+```
+
+A missing path is `exists: false`, not an error. A path that couldn't be checked carries `success: false` and an `error`. `md5` is the backend's own checksum, for change detection only. It isn't an integrity check: the canonical check is SHA-256 on the bytes. Fields a backend can't supply are `null`.
+
+**Errors (whole call):**
+- `INVALID_ARGS` — `paths` missing or empty
+- `NOT_AUTHENTICATED` — No valid credential
+- `NOT_IMPLEMENTED` — The adapter doesn't support `statBatch`
+
+---
+
 ## Error Response Format
 
 All errors are returned as MCP tool errors with a structured JSON message:
@@ -696,7 +794,7 @@ For Google OAuth apps in "testing" status (not verified), refresh tokens expire 
 
 ## Backend Adapter Contract
 
-Each backend adapter must implement the following interface. **Contract version 2.0** adds five access-control methods, a `search` method, and an `ifRevision` parameter to `write`. Adapters declare which contract version they implement via the `contractVersion` field on their adapter manifest.
+Each backend adapter must implement the following interface. **Contract version 2.0** adds five access-control methods, a `search` method, and an `ifRevision` parameter to `write`. Adapters declare which contract version they implement via the `contract_version` field in their `adapter.json` (§ "Adapter Manifest").
 
 ```typescript
 interface BackendAdapter {
@@ -730,6 +828,12 @@ interface BackendAdapter {
 
   // Optional. Adapters whose backend has no transferable ownership omit this method entirely.
   transferOwnership?(path: string, newOwner: string): Promise<TransferResult>;
+
+  // Optional batch ops (aifs_write_batch / aifs_stat_batch). Advertise them as
+  // "writeBatch" / "statBatch" in supported_operations. The executor resolves
+  // content_file before calling writeBatch, so entries always carry content.
+  writeBatch?(entries: Array<{ path: string; content: string }>, options?: WriteOptions): Promise<WriteBatchResult>;
+  statBatch?(paths: string[]): Promise<StatBatchResult>;
 }
 
 interface WriteOptions {
@@ -777,29 +881,46 @@ interface PermissionList {
 interface TransferResult {
   transferred: boolean;
 }
+
+interface WriteBatchResult {
+  total: number;
+  succeeded: number;
+  failed: number;
+  results: Array<{ path: string; success: boolean; revision?: string | null; error?: { code: string; message: string } }>;
+}
+
+interface StatBatchResult {
+  total: number;
+  results: Array<{ path: string; exists?: boolean; id?: string; name?: string; size?: number | null; mimeType?: string; md5?: string | null; revision?: string | null; success?: false; error?: { code: string; message: string } }>;
+}
 ```
 
 Adapters throw typed errors (e.g., `FileNotFoundError`, `NotAuthenticatedError`, `RevisionConflictError`, `InvalidSubjectError`, `NotImplementedError`) which the executor translates into the standard error response format.
 
 ### Adapter Manifest
 
-Each adapter package's `adapter.json` declares the contract version it implements and which optional methods it supports:
+Each adapter package's `adapter.json` declares the contract version it implements and which optional methods and write features it supports. Keys are snake_case. Operation names in `supported_operations` are the method names of the `BackendAdapter` interface. An excerpt, with the values gdrive 2.11.4 ships:
 
 ```json
 {
-  "adapter": "gdrive",
-  "version": "2.0.0",
-  "contractVersion": "2.0.0",
-  "supportedOperations": [
+  "name": "agent-index-filesystem-gdrive",
+  "version": "2.11.4",
+  "backend_id": "gdrive",
+  "contract_version": "2.0.0",
+  "supported_operations": [
     "read", "write", "list", "exists", "stat", "delete", "copy",
-    "search",
-    "share", "unshare", "getPermissions", "transferOwnership"
+    "share", "unshare", "getPermissions", "search", "transferOwnership",
+    "writeBatch", "statBatch"
   ],
-  "writeSupportsIfRevision": true
+  "write_supports_if_revision": true,
+  "write_supports_content_file": true,
+  "write_supports_content_stdin": true
 }
 ```
 
-Adapters that ship a partial v2.0 implementation (e.g., not yet implementing `share`/`unshare`) declare `contractVersion: "1.0.0"` and let consumers know not to call the missing ops. The executor uses the manifest to surface clear `NOT_IMPLEMENTED` errors when a consumer attempts an unsupported op rather than letting the call fail mysteriously inside the adapter.
+`write_supports_content_file` and `write_supports_content_stdin` say the adapter's executor accepts those `aifs_write` content sources (§ "aifs_write"). They describe the executor, not the adapter: the `BackendAdapter` `write` method always receives content.
+
+Adapters that ship a partial v2.0 implementation (e.g., not yet implementing `share`/`unshare`) declare `contract_version: "1.0.0"` and let consumers know not to call the missing ops. The executor uses the manifest to surface clear `NOT_IMPLEMENTED` errors when a consumer attempts an unsupported op rather than letting the call fail mysteriously inside the adapter.
 
 
 ### Additional Adapter Requirements
@@ -814,3 +935,13 @@ Adapters that ship a partial v2.0 implementation (e.g., not yet implementing `sh
 - `invalid_grant` (expired or already-used auth code) → `{ retryable: true }`
 - `redirect_uri_mismatch` (configuration error) → `{ retryable: false }`
 - Other errors → generic `AuthFailedError` with the backend's error message
+
+---
+
+## Contract changelog
+
+Changes to this specification that don't change the contract version. None of them requires an adapter to change.
+
+- **2026-10-15:** `aifs_write`'s input schema changed from `"required": ["path", "content"]` to `path` plus exactly one of `content`, `content_file` or `content_stdin` (`oneOf`). This is a schema change, though it describes behaviour every gdrive executor since 2.6.0 already had: the executor resolves the extra sources before calling `write`, so the `BackendAdapter` contract is unchanged. (First published in agent-index-filesystem#1, 2026-09-30.)
+- **2026-10-15:** documented `aifs_write_batch` and `aifs_stat_batch` (gdrive 2.9.0+) as optional operations, with their `BackendAdapter` methods `writeBatch` / `statBatch`.
+- **2026-10-15:** the Adapter Manifest example now uses the snake_case keys real `adapter.json` files use, and shows `write_supports_content_file` / `write_supports_content_stdin`.
