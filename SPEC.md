@@ -342,7 +342,30 @@ or
 }
 ```
 
-Possible `reason` values when not authenticated: `no_credential`, `expired`, `revoked`, `invalid`.
+or, when a stored credential could not be refreshed:
+```json
+{
+  "authenticated": false,
+  "backend": "gdrive",
+  "reason": "network_error",
+  "detail": "getaddrinfo ENOTFOUND oauth2.googleapis.com"
+}
+```
+
+Possible `reason` values when not authenticated:
+
+| `reason` | Meaning | Re-authenticate? |
+|---|---|---|
+| `no_credential` | No stored credential | Yes |
+| `expired` | The refresh token was rejected (`invalid_grant`) or revoked | Yes |
+| `refresh_failed` | The refresh failed for a reason the adapter can't classify | Yes |
+| `network_error` | The token endpoint couldn't be reached (DNS, connection refused or reset, timeout) | No: a connection problem |
+| `tls_or_proxy_error` | A TLS/certificate or proxy failure (including HTTP 407) on the way to the token endpoint | No: a network-configuration problem |
+| `credential_write_failed` | The refresh succeeded but the new credential couldn't be written to the credential store | No: a local storage problem |
+
+The last three are not credential problems, and signing in again doesn't fix them: report `detail` and stop, rather than starting `aifs_authenticate`. `detail` (string) carries the underlying error message whenever a refresh was attempted. The adapter reports only `expired` for a genuine `invalid_grant` / revocation; a transport failure must never be reported as `expired`.
+
+The classified values (`refresh_failed`, `network_error`, `tls_or_proxy_error`, `credential_write_failed`) and `detail` are reported by gdrive 2.11.5+. Adapters that don't classify refresh failures (onedrive 2.7.1) report `no_credential` or `expired`. `revoked` and `invalid` are accepted legacy values with the meaning of `expired`.
 
 ---
 
@@ -455,9 +478,15 @@ Grant a subject (email or group address) a role at a path. Wraps the backend's n
 
 The `permission_id` is the backend-native handle for the grant. May be `null` for backends without persistent permission identifiers.
 
+Optional result fields:
+- `inherit_disabled` (boolean) — whether the grant was applied as an `inherit: false` override. Always `false` on backends that ignore `inherit: false` (OneDrive applies every grant additively).
+- `external` (boolean, onedrive 2.7.1+) — the subject is an email address outside the tenant's verified domains (or, when those can't be read, one that doesn't resolve to a tenant user).
+- `invitation_sent` (boolean, onedrive 2.7.1+) — the backend sent its own sharing invitation to the subject. On OneDrive this is `true` exactly when `external` is: an outside recipient has no account to grant silently and must redeem the invitation; tenant users get a silent grant. Adapters that don't report these fields send no invitations.
+
 **Errors:**
 - `ACCESS_DENIED` — Authenticated but lacks permission to share this resource
 - `INVALID_SUBJECT` — The `subject` is not a valid email or group address recognized by the backend
+- `EXTERNAL_SHARE_BLOCKED` — (onedrive 2.7.1+) The subject is a valid address outside the organization, and the tenant's or site's external-sharing policy refused the share. Not an identity problem: don't ask for a different address. See § "Error Response Format" for its fields.
 - `INVALID_ROLE` — The `role` value is not accepted, or the backend does not support it at this path
 - `NOT_AUTHENTICATED` — No valid credential
 - `PATH_NOT_FOUND` — The resource at `path` does not exist
@@ -640,7 +669,7 @@ The `truncated` field indicates whether the result set was capped. When `truncat
 
 ### aifs_write_batch
 
-Write many files in one executor process. Optional: an adapter supports it when its manifest lists `writeBatch` in `supported_operations` (gdrive 2.9.0+, advertised from 2.10.0). Callers that don't find it there should fall back to one `aifs_write` per file.
+Write many files in one executor process. Optional: an adapter supports it when its manifest lists `writeBatch` in `supported_operations` (gdrive 2.9.0+, advertised from 2.10.0; onedrive 2.6.0+). Callers that don't find it there should fall back to one `aifs_write` per file.
 
 **Input Schema:**
 ```json
@@ -697,7 +726,7 @@ A failed entry does not fail the call. Check `failed` and each entry's `success`
 
 ### aifs_stat_batch
 
-Get metadata for many paths in one executor process. Optional: an adapter supports it when its manifest lists `statBatch` in `supported_operations` (gdrive 2.9.0+, advertised from 2.10.0).
+Get metadata for many paths in one executor process. Optional: an adapter supports it when its manifest lists `statBatch` in `supported_operations` (gdrive 2.9.0+, advertised from 2.10.0; onedrive 2.6.0+).
 
 **Input Schema:**
 ```json
@@ -727,7 +756,7 @@ Get metadata for many paths in one executor process. Optional: an adapter suppor
 }
 ```
 
-A missing path is `exists: false`, not an error. A path that couldn't be checked carries `success: false` and an `error`. `md5` is the backend's own checksum, for change detection only. It isn't an integrity check: the canonical check is SHA-256 on the bytes. Fields a backend can't supply are `null`.
+A missing path is `exists: false`, not an error. A path that couldn't be checked carries `success: false` and an `error`. `md5` is the backend's own checksum, for change detection only. It isn't an integrity check: the canonical check is SHA-256 on the bytes. Fields a backend can't supply are `null` or absent: onedrive 2.7.1 returns no `name` or `md5`, and `mimeType` is `"folder"` for a folder and `null` for a file.
 
 **Errors (whole call):**
 - `INVALID_ARGS` — `paths` missing or empty
@@ -759,6 +788,34 @@ For `AUTH_FAILED` errors, the response may include a `retryable` boolean:
 }
 ```
 
+`NOT_AUTHENTICATED` errors, from any operation, carry `reason` and a top-level `needs_auth` boolean, so callers branch on one flag instead of parsing the message. When the error comes from a failed token refresh (gdrive 2.11.5+), it also carries `refresh_reason` (one of the `aifs_auth_status` reasons: `expired`, `refresh_failed`, `network_error`, `tls_or_proxy_error`, `credential_write_failed`) and `refresh_detail`, and `needs_auth` is `true` only for `expired` and `refresh_failed`:
+```json
+{
+  "error": "NOT_AUTHENTICATED",
+  "message": "Not authenticated: Token refresh failed: getaddrinfo ENOTFOUND oauth2.googleapis.com",
+  "reason": "Token refresh failed: getaddrinfo ENOTFOUND oauth2.googleapis.com",
+  "needs_auth": false,
+  "refresh_reason": "network_error",
+  "refresh_detail": "getaddrinfo ENOTFOUND oauth2.googleapis.com"
+}
+```
+With `needs_auth: false`, don't start `aifs_authenticate`: report the problem and stop the remote part of the task. In this case `reason` is free text; branch on `refresh_reason`.
+
+`EXTERNAL_SHARE_BLOCKED` errors (onedrive 2.7.1+, `aifs_share`) carry the backend's own explanation:
+```json
+{
+  "error": "EXTERNAL_SHARE_BLOCKED",
+  "message": "Your organization's sharing settings don't allow sharing with people outside the organization",
+  "path": "/shared/library/doc-1",
+  "subject": "someone@example.com",
+  "reason": "Sharing is not allowed for external users.",
+  "graph_status": 403,
+  "graph_code": "accessDenied/notAllowed",
+  "policy_inferred": false
+}
+```
+`reason` is Graph's message (or `null`), `graph_status` the HTTP status and `graph_code` Graph's error code(s), `/`-joined. `policy_inferred: true` means Graph refused with only a generic error (`sharingFailed`, "There was a problem sharing") and no policy wording, so the external-sharing policy is the likely cause, not a certain one: word it as "usually the tenant's external-sharing setting". Other OneDrive permission errors (`ACCESS_DENIED`, `INVALID_SUBJECT`, `BACKEND_ERROR`) include Graph's status, code and message in `message` (onedrive 2.7.1+).
+
 ## Token Management
 
 OAuth-based adapters (Google Drive, OneDrive) must handle token lifecycle transparently so that members never encounter auth prompts during normal use after their initial setup.
@@ -779,7 +836,7 @@ Access tokens are short-lived (typically 1 hour for Google). Adapters must handl
 
 ### Refresh Token Validity
 
-Refresh tokens are long-lived but can be revoked by the user, the admin, or the identity provider. When a refresh token is invalid, the adapter should throw `NotAuthenticatedError('expired')`, which signals Claude to guide the member through re-authentication via `aifs_authenticate`.
+Refresh tokens are long-lived but can be revoked by the user, the admin, or the identity provider. When a refresh token is invalid, the adapter should throw `NotAuthenticatedError('expired')`, which signals Claude to guide the member through re-authentication via `aifs_authenticate`. A refresh that fails for any other reason must not be reported as `expired`: classify it as § "aifs_auth_status" lists and set `needs_auth` accordingly (§ "Error Response Format").
 
 For Google OAuth apps in "testing" status (not verified), refresh tokens expire after 7 days. Production-verified apps have indefinite refresh tokens. Admins should verify their OAuth app to avoid weekly re-authentication.
 
@@ -945,3 +1002,4 @@ Changes to this specification that don't change the contract version. None of th
 - **2026-10-15:** `aifs_write`'s input schema changed from `"required": ["path", "content"]` to `path` plus exactly one of `content`, `content_file` or `content_stdin` (`oneOf`). This is a schema change, though it describes behaviour every gdrive executor since 2.6.0 already had: the executor resolves the extra sources before calling `write`, so the `BackendAdapter` contract is unchanged. (First published in agent-index-filesystem#1, 2026-09-30.)
 - **2026-10-15:** documented `aifs_write_batch` and `aifs_stat_batch` (gdrive 2.9.0+) as optional operations, with their `BackendAdapter` methods `writeBatch` / `statBatch`.
 - **2026-10-15:** the Adapter Manifest example now uses the snake_case keys real `adapter.json` files use, and shows `write_supports_content_file` / `write_supports_content_stdin`.
+- **2026-10-17 (adapters for core 4.0.1):** documented what gdrive 2.11.5 and onedrive 2.7.1 added. `aifs_auth_status` gains the `reason` values `refresh_failed`, `network_error`, `tls_or_proxy_error` and `credential_write_failed` and a `detail` field (gdrive); `NOT_AUTHENTICATED` documents `needs_auth`, `refresh_reason` and `refresh_detail`; `aifs_share` gains the result fields `external` and `invitation_sent` and the error `EXTERNAL_SHARE_BLOCKED` with `reason`, `graph_status`, `graph_code` and `policy_inferred` (onedrive). The batch operations note onedrive 2.6.0+. All additive: callers that ignore the new fields and values behave as before, except that a caller treating every `authenticated: false` as "sign in again" should now check `reason`.
