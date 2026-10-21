@@ -942,7 +942,7 @@ For Google OAuth apps in "testing" status (not verified), refresh tokens expire 
 - No trailing slashes on directory paths
 - The root path is `/`
 - Backend adapters handle mapping logical paths to backend-native identifiers (e.g., Google Drive file IDs, S3 object keys)
-- Instead of a path, any tool's `path` (and `aifs_search`'s `scope`) can be an **id anchor**, described below
+- Instead of a path, any tool's `path` can be an **id anchor**, described below. `aifs_search`'s `scope` can be one on onedrive only: gdrive requires an absolute path (`/...`) and returns `INVALID_SCOPE` otherwise
 
 ### ID anchors
 
