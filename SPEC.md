@@ -1104,7 +1104,7 @@ Adapters that ship a partial v2.0 implementation (e.g., not yet implementing `sh
 
 ## Adapter Packaging
 
-How an adapter repository is laid out and built. This section replaces `agent-index-meta-docs/filesystem-adapter-spec.md` (CI-012). How a built adapter reaches an org and its members, and how it is updated, is distribution, owned by core: `admin-distribution.md` § "Distribution: backend-first (Release C — the current model)" and § "Release procedure (admin-side)". In short, members never download an adapter from GitHub: the admin builds from a tag-pinned local clone, and members receive the bundle inside the org's bootstrap zip and through `@ai:update`.
+How an adapter repository is laid out and built. This section replaces `agent-index-meta-docs/filesystem-adapter-spec.md` (CI-012). How a built adapter reaches an org and its members, and how it is updated, is distribution, owned by core: `admin-distribution.md` § "Distribution: backend-first (Release C — the current model)" and § "Release procedure (admin-side)". In short: the adapter's maintainers build it (§ "Build") and release it with the bundle committed. An org never rebuilds it: the org admin's setup (create-org) clones the adapter repository at its release tag, verifies the committed bundle's checksum and stages it into the org's bootstrap zip. Members receive it from that zip and through `@ai:update`, never from GitHub.
 
 ### Repository layout
 
