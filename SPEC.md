@@ -134,7 +134,7 @@ Write content to a path on the remote filesystem. Creates parent directories/fol
 }
 ```
 
-**Content sources.** Exactly one of `content`, `content_file` or `content_stdin` must be supplied. `content_file` and `content_stdin` are resolved by the executor, which reads the payload and passes it to the adapter as ordinary content, so they add nothing to the `BackendAdapter` contract below: `write(path, content, options)` is unchanged. The gdrive executor (2.6.0+) does not enforce "exactly one": when more than one is supplied it uses the first present of `content`, `content_file`, `content_stdin` and ignores the rest without an error. A `content_file` that cannot be read fails the call with `BACKEND_ERROR`; the message carries the local file error.
+**Content sources.** Exactly one of `content`, `content_file` or `content_stdin` must be supplied. `content_file` and `content_stdin` are resolved by the executor, which reads the payload and passes it to the adapter as ordinary content, so they add nothing to the `BackendAdapter` contract below: `write(path, content, options)` is unchanged. Both executors accept them: gdrive since 2.6.0, onedrive since 2.0.1 (onedrive's `adapter.json` doesn't yet declare `write_supports_content_file` / `write_supports_content_stdin`, but its executor resolves both). The gdrive executor (2.6.0+) does not enforce "exactly one": when more than one is supplied it uses the first present of `content`, `content_file`, `content_stdin` and ignores the rest without an error. A `content_file` that cannot be read fails the call with `BACKEND_ERROR`; the message carries the local file error.
 
 **Returns:**
 ```json
@@ -1102,6 +1102,88 @@ Adapters that ship a partial v2.0 implementation (e.g., not yet implementing `sh
 - `redirect_uri_mismatch` (configuration error) → `{ retryable: false }`
 - Other errors → generic `AuthFailedError` with the backend's error message
 
+## Adapter Packaging
+
+How an adapter repository is laid out and built. This section replaces `agent-index-meta-docs/filesystem-adapter-spec.md` (CI-012). How a built adapter reaches an org and its members, and how it is updated, is distribution, owned by core: `admin-distribution.md` § "Distribution: backend-first (Release C — the current model)" and § "Release procedure (admin-side)". In short, members never download an adapter from GitHub: the admin builds from a tag-pinned local clone, and members receive the bundle inside the org's bootstrap zip and through `@ai:update`.
+
+### Repository layout
+
+```
+agent-index-filesystem-{backend}/
+├── adapter.json              # Adapter manifest (below)
+├── package.json              # Source dependencies and the build scripts
+├── package-lock.json
+├── .gitignore                # node_modules/ (dist/ is committed)
+├── .gitattributes            # LF everywhere; dist/ bundle and wrapper pinned to LF
+├── README.md, LICENSE
+├── scripts/
+│   └── build.js              # npm run build
+├── src/
+│   ├── exec.mjs              # On-demand executor entry point (routeToolCall)
+│   ├── aifs-exec.sh          # Shell wrapper (copied to dist/ by the build)
+│   ├── index.js              # MCP server entry (not used by the on-demand executor)
+│   └── adapters/
+│       ├── {backend}.js      # BackendAdapter implementation
+│       └── {backend}.test.js # node --test
+└── dist/                     # Built output, committed: this is what ships
+    ├── aifs-exec.bundle.js
+    └── aifs-exec.sh
+```
+
+`dist/` is committed and is the distribution artifact; `src/aifs-exec.sh` and `dist/aifs-exec.sh` are identical. `.gitattributes` forces LF so the committed bundle and wrapper keep the bytes their checksum was computed over on every host OS.
+
+### Manifest fields
+
+The full `adapter.json` field list (the excerpt in § "Adapter Manifest" shows the contract fields):
+
+| Field | Description |
+|---|---|
+| `name` | `agent-index-filesystem-{backend_id}` |
+| `display_name` | Human-readable name shown during org setup |
+| `version` | Semver version of the adapter |
+| `description` | Release notes by version, newest first |
+| `author`, `license` | Author or organization; license identifier |
+| `core_version` | Minimum compatible `@agent-index/filesystem` version |
+| `contract_version` | The `BackendAdapter` contract version implemented (§ "Adapter Manifest") |
+| `supported_operations` | Implemented `BackendAdapter` methods |
+| `supported_operations_pending` | Methods declared but not yet implemented (an empty array on current adapters) |
+| `write_supports_if_revision`, `write_supports_content_file`, `write_supports_content_stdin` | Write features (§ "Adapter Manifest") |
+| `backend_id` | Short id used in `agent-index.json` `remote_filesystem.backend`: `gdrive`, `onedrive`, `s3` |
+| `auth_method` | `oauth2`, `aws-credentials`, `aws-sso` or `api-key` |
+| `connection_schema` | The connection fields the admin provides at org setup, each with `type`, `required` and `description`. gdrive: `client_id`, `client_secret`, `drive_id`, `root_folder_id`, `all_members_group`. onedrive: `tenant_id`, `client_id`, `site_id`, `drive_id`, `all_members_group` (public client with PKCE, no secret). |
+| `required_domains` | Hosts the adapter must reach at runtime, used for network-allowlist checks. Wildcards are allowed (onedrive: `*.sharepoint.com`, `*-my.sharepoint.com`). |
+| `required_domains_note` | Optional explanation of the domains (onedrive) |
+| `node_min_version` | Minimum Node.js version (`18.0.0`) |
+| `exec_bundle_entry` | `dist/aifs-exec.bundle.js` |
+| `exec_shell_wrapper` | `dist/aifs-exec.sh` |
+| `bundle_built_at` | ISO 8601 UTC time of the last build; written by the build |
+| `exec_bundle_checksum` | `sha256:<hex>` of `dist/aifs-exec.bundle.js`; written by the build |
+
+### Exec bundle
+
+`dist/aifs-exec.bundle.js` is a single ES-module file built by esbuild from `src/exec.mjs` (`--platform=node --target=node18 --format=esm`, with a `createRequire` banner). It inlines every dependency, including `@agent-index/filesystem` (a `file:../agent-index-filesystem` dependency, so building needs a sibling clone of this repo) and the backend SDK, so at runtime it needs only Node.js: no `npm install`, no package resolution. It runs one `aifs_*` call per process: reads the config, runs the tool, prints JSON to stdout, exits. A path cache persisted in the credential store saves backend lookups between calls.
+
+### Shell wrapper
+
+`aifs-exec.sh <tool_name> '<json_args>'` (or `--help`):
+- **Config:** `AIFS_CONFIG_PATH` if set; otherwise walk up from the wrapper's directory for `agent-index.json`; otherwise the first `$HOME/mnt/*/agent-index.json` (Cowork mounts).
+- **Bundle:** `aifs-exec.bundle.js` in the wrapper's directory (installed layout, `mcp-servers/filesystem/`); otherwise `../dist/aifs-exec.bundle.js` (source repo); otherwise `exec.mjs` in the same directory (development).
+- Neither found: prints `{"error":"CONFIG_ERROR",…}` or `{"error":"EXEC_ERROR",…}` and exits 1. Otherwise it runs `node --no-deprecation --no-warnings` on the bundle and exits with its code.
+
+### Build
+
+`npm run build` (`scripts/build.js`):
+1. `npm run build:exec`: esbuild writes `dist/aifs-exec.bundle.js`.
+2. Computes the bundle's SHA-256.
+3. Copies `src/aifs-exec.sh` to `dist/aifs-exec.sh`.
+4. Stamps `adapter.json`: `bundle_built_at` and `exec_bundle_checksum` (`sha256:<hex>`).
+
+Commit `dist/` and `adapter.json` together. `npm test` runs `node --test` on the adapter tests.
+
+### Integrity rule
+
+`exec_bundle_checksum` must equal the SHA-256 of the committed `dist/aifs-exec.bundle.js`, and the bundle must pass `node --check`. Release tooling enforces it (developer collection: `release-prep` and preflight Check 14), and every install path verifies it before deploying a bundle (create-org, edit-org, `apply-updates` Phase 3): a mismatch aborts; it is never retried or ignored.
+
 ---
 
 ## Contract changelog
@@ -1113,3 +1195,4 @@ Changes to this specification that don't change the contract version. None of th
 - **2026-10-15:** the Adapter Manifest example now uses the snake_case keys real `adapter.json` files use, and shows `write_supports_content_file` / `write_supports_content_stdin`.
 - **2026-10-17 (adapters for core 4.0.1):** documented what gdrive 2.11.5 and onedrive 2.7.1 added. `aifs_auth_status` gains the `reason` values `refresh_failed`, `network_error`, `tls_or_proxy_error` and `credential_write_failed` and a `detail` field (gdrive); `NOT_AUTHENTICATED` documents `needs_auth`, `refresh_reason` and `refresh_detail`; `aifs_share` gains the result fields `external` and `invitation_sent` and the error `EXTERNAL_SHARE_BLOCKED` with `reason`, `graph_status`, `graph_code` and `policy_inferred` (onedrive). The batch operations note onedrive 2.6.0+. All additive: callers that ignore the new fields and values behave as before, except that a caller treating every `authenticated: false` as "sign in again" should now check `reason`.
 - **2026-10-20 (CI-014):** documented behaviour the adapters already have. Path Conventions gains § "ID anchors" (`id:{id}`, `id:{id}/rel`, `id:{drive_id}:{id}`, which gdrive doesn't accept) and onedrive 2.7.1's bare-id retry on the site drive (finding 63). `aifs_read` gains the `encoding` input (gdrive 2.11.3), § "Read integrity" (gdrive 2.11.6's size and md5 check, bug 733b) and the `AIFS_READ_UNRELIABLE` error. `aifs_stat` documents `id`, `drive_id` and `web_url` (and onedrive's `is_dir`). `aifs_delete` documents gdrive's Shared Drive trash fallback. New sections for the onedrive-only `aifs_resolve_identity` and `aifs_resolve_site`. No adapter changes.
+- **2026-10-21 (CI-012):** new § "Adapter Packaging" (repository layout, the full manifest field list, the exec bundle, the shell wrapper, the build and the integrity rule), replacing `agent-index-meta-docs/filesystem-adapter-spec.md`; distribution is left to core `admin-distribution.md`. § "aifs_write" notes the onedrive executor has accepted `content_file` / `content_stdin` since 2.0.1. No adapter changes.
