@@ -64,7 +64,8 @@ interface BackendAdapter {
 ## Related Documentation
 
 - `SPEC.md` — Full `aifs_*` tool interface specification
-- `agent-index-meta-docs/filesystem-adapter-spec.md` — Adapter implementation and distribution specification
+- `SPEC.md` § "Adapter Packaging" — adapter repository layout, manifest fields, build and integrity (formerly `agent-index-meta-docs/filesystem-adapter-spec.md`)
+- `agent-index-core/admin-distribution.md` — how adapters are released and reach members
 
 ## License
 

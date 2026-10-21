@@ -48,19 +48,42 @@ Read file content at a path on the remote filesystem.
   "properties": {
     "path": {
       "type": "string",
-      "description": "Path relative to remote filesystem root (e.g., '/org-config.json', '/shared/reports/q1.md')"
+      "description": "Path relative to remote filesystem root (e.g., '/org-config.json', '/shared/reports/q1.md'), or an id: anchor (see Path Conventions)"
+    },
+    "encoding": {
+      "type": "string",
+      "enum": ["base64"],
+      "description": "Optional (gdrive 2.11.3+). \"base64\" always returns the base64: form, even for content that would decode as text."
     }
   },
   "required": ["path"]
 }
 ```
 
-**Returns:** File content as a string (UTF-8 text files) or base64-encoded string with a `base64:` prefix (binary files).
+**Returns:** File content as a string (UTF-8 text files) or base64-encoded string with a `base64:` prefix (binary files). With `encoding: "base64"` (gdrive), always the `base64:` form. The onedrive executor doesn't read `encoding` and returns the default form.
+
+**Read integrity.** A read never returns content the backend says is incomplete:
+- **Empty reads (gdrive 2.6.0+, onedrive).** If the body is empty but the file's metadata reports a size above 0, the read retries with backoff (500, 1000, 2000 ms). Still empty: `AIFS_READ_UNRELIABLE` with `declared_size` and `retries`. A file that really is empty (size 0) returns immediately.
+- **Size and checksum (gdrive 2.11.6+, bug 733b).** Every read also fetches the file's `size`, `md5Checksum` and `mimeType` (one extra metadata call) and compares the body: its byte length must equal `size`, and its MD5 must equal `md5Checksum`. On a mismatch it re-reads the body and the metadata (the file may have changed between the two calls) with the same backoff. Still mismatched: `AIFS_READ_UNRELIABLE` with `reason` `size_mismatch` or `checksum_mismatch`, `declared_size`, `received_size` and `retries`. Not checked: a file without an `md5Checksum`, native Google Docs/Sheets/Slides files, and a non-empty read whose metadata call fails (the body is returned unchecked; an empty read still needs the metadata, so there the metadata error is returned).
+
+```json
+{
+  "error": "AIFS_READ_UNRELIABLE",
+  "message": "read: content returned for \"/shared/projects/x/action-items.json\" doesn't match the file's current size (got 1200 bytes, metadata reports 1803 bytes; retried 3x). Stale or incomplete read — retry the operation; do NOT use this content.",
+  "path": "/shared/projects/x/action-items.json",
+  "reason": "size_mismatch",
+  "declared_size": 1803,
+  "received_size": 1200,
+  "retries": 3
+}
+```
+Retry the operation later; never use or write back content from a failed read.
 
 **Errors:**
 - `FILE_NOT_FOUND` — No file exists at the given path
 - `ACCESS_DENIED` — Authenticated but lacks permission to read this file
 - `NOT_AUTHENTICATED` — No valid credential; member must authenticate
+- `AIFS_READ_UNRELIABLE` — The backend returned empty, short or mismatched content after retries (see Read integrity)
 - `BACKEND_ERROR` — Storage backend returned an unexpected error (details in message)
 
 ---
@@ -111,7 +134,7 @@ Write content to a path on the remote filesystem. Creates parent directories/fol
 }
 ```
 
-**Content sources.** Exactly one of `content`, `content_file` or `content_stdin` must be supplied. `content_file` and `content_stdin` are resolved by the executor, which reads the payload and passes it to the adapter as ordinary content, so they add nothing to the `BackendAdapter` contract below: `write(path, content, options)` is unchanged. The gdrive executor (2.6.0+) does not enforce "exactly one": when more than one is supplied it uses the first present of `content`, `content_file`, `content_stdin` and ignores the rest without an error. A `content_file` that cannot be read fails the call with `BACKEND_ERROR`; the message carries the local file error.
+**Content sources.** Exactly one of `content`, `content_file` or `content_stdin` must be supplied. `content_file` and `content_stdin` are resolved by the executor, which reads the payload and passes it to the adapter as ordinary content, so they add nothing to the `BackendAdapter` contract below: `write(path, content, options)` is unchanged. Both executors accept them: gdrive since 2.6.0, onedrive since 2.0.1 (onedrive's `adapter.json` doesn't yet declare `write_supports_content_file` / `write_supports_content_stdin`, but its executor resolves both). The gdrive executor (2.6.0+) does not enforce "exactly one": when more than one is supplied it uses the first present of `content`, `content_file`, `content_stdin` and ignores the rest without an error. A `content_file` that cannot be read fails the call with `BACKEND_ERROR`; the message carries the local file error.
 
 **Returns:**
 ```json
@@ -227,15 +250,23 @@ Get file metadata without reading content. Used for staleness checks and conditi
 **Returns:**
 ```json
 {
+  "id": "1T4eTjV5jUpLNCvgc4INPSkK_WSf5SOjM",
   "size": 1024,
   "modified": "2026-03-24T10:00:00Z",
   "created": "2026-03-20T08:00:00Z",
   "etag": "\"abc123\"",
-  "revision": "0BxYz..."
+  "revision": "0BxYz...",
+  "drive_id": "0AP3wpFk8LzTOUk9PVA",
+  "web_url": "https://drive.google.com/file/d/1T4eTjV5jUpLNCvgc4INPSkK_WSf5SOjM/view"
 }
 ```
 
 Fields `created`, `etag`, and `revision` are optional — included when the backend supports them. The `revision` field (v2.0+) is the value to pass as `if_revision` on a subsequent revision-aware write.
+
+- **`id`** — the backend's id for the item; pass it as `id:{id}` (see Path Conventions).
+- **`drive_id`** — the drive the item lives in. gdrive (2.11.4+): the Shared Drive id, or `null` for an item in someone's My Drive. onedrive: the item's home drive (`parentReference.driveId`). Pointer files record it as `item_drive_id`, so a reader can address an item on another member's OneDrive as `id:{drive_id}:{id}`, and member-bootstrap uses it to tell a member's own space from a Shared Drive folder.
+- **`web_url`** — a browser link to the item (gdrive `webViewLink`, onedrive `webUrl`), or `null` when the backend has none. invite-member puts it in the welcome email as the bootstrap-zip link.
+- onedrive also returns **`is_dir`**.
 
 **Errors:**
 - `FILE_NOT_FOUND` — No file at this path
@@ -267,9 +298,11 @@ Delete a file or empty directory.
 { "success": true }
 ```
 
+**gdrive on a Shared Drive: delete may mean trash.** The adapter tries a permanent delete first. If Drive refuses it with 404 or 403 (on a Shared Drive only organizers can delete permanently; Drive answers 404 rather than 403 for some permission refusals), it moves the item to the trash instead and still returns `{ "success": true }`. The result doesn't say which happened; the item is restorable from the Shared Drive's trash. If trashing is refused too, the delete fails with `ACCESS_DENIED` and an explanation (organizer or contentManager role needed). A 404 that comes from a stale cached id is re-resolved by path first, so a file that really is gone returns `FILE_NOT_FOUND`. On My Drive, and on onedrive, there is no trash fallback.
+
 **Errors:**
 - `FILE_NOT_FOUND` — Nothing exists at this path
-- `ACCESS_DENIED` — Lacks delete permission
+- `ACCESS_DENIED` — Lacks delete permission (gdrive Shared Drive: lacks permission to delete or trash)
 - `NOT_EMPTY` — Attempted to delete a non-empty directory
 - `NOT_AUTHENTICATED` — No valid credential
 - `BACKEND_ERROR` — Storage backend error
@@ -765,6 +798,67 @@ A missing path is `exists: false`, not an error. A path that couldn't be checked
 
 ---
 
+### aifs_resolve_identity
+
+**onedrive only (2.2.0+).** Resolve a member reference (email, UPN or object id) to the tenant's grantable identity. On Microsoft 365 the roster email often isn't the address Graph can share to, so invite-member resolves it once and stores the result as the member's `sharing_identity`.
+
+**gdrive doesn't implement this tool:** it returns `UNKNOWN_TOOL`. On gdrive the email is the grantable identity, so callers use the email as is.
+
+**Input Schema:**
+```json
+{
+  "type": "object",
+  "properties": {
+    "ref": {
+      "type": "string",
+      "description": "Email, UPN or Entra object id. A leading mailto: is ignored. The executor also accepts the same value under email, subject, identity, upn, user, member or recipient."
+    }
+  },
+  "required": ["ref"]
+}
+```
+
+**Returns:**
+```json
+{ "id": "3f2504e0-4f89-11d3-9a0c-0305e82c3301", "upn": "kallista@contoso.onmicrosoft.com", "mail": "kallista@contoso.com" }
+```
+`id` (the Entra object id) is the most reliable recipient for a share. The lookup tries a direct `GET /users/{ref}` (a UPN or object id), then a filter on `mail`, `userPrincipalName` and SMTP `proxyAddresses`, so vanity addresses resolve.
+
+**Errors:**
+- `INVALID_SUBJECT` — No user in the tenant matches (or `ref` is empty)
+- `ACCESS_DENIED` — The app registration lacks the delegated Graph permission `User.Read.All`. The user most likely exists: add the permission, grant admin consent, then re-authenticate.
+- `NOT_AUTHENTICATED` — No valid credential
+- `BACKEND_ERROR` — Graph error
+
+---
+
+### aifs_resolve_site
+
+**onedrive only (2.0.1+); not a `BackendAdapter` contract operation.** An executor tool create-org uses to turn a SharePoint site URL into the ids the connection config needs. gdrive returns `UNKNOWN_TOOL`.
+
+**Input Schema:**
+```json
+{
+  "type": "object",
+  "properties": {
+    "site_url": { "type": "string", "description": "SharePoint site URL including the /sites/<name> path, e.g. https://contoso.sharepoint.com/sites/agent-index" }
+  },
+  "required": ["site_url"]
+}
+```
+
+**Returns:**
+```json
+{ "site_id": "contoso.sharepoint.com,1234...,5678...", "drive_id": "b!AbC...", "site_web_url": "https://contoso.sharepoint.com/sites/agent-index", "drive_name": "Documents" }
+```
+
+**Errors:**
+- `INVALID_ARGS` — Not a URL, or no `/sites/<name>` path
+- `NOT_AUTHENTICATED` — No valid credential
+- `BACKEND_ERROR` — Graph error (e.g. no such site)
+
+---
+
 ## Error Response Format
 
 All errors are returned as MCP tool errors with a structured JSON message:
@@ -848,6 +942,21 @@ For Google OAuth apps in "testing" status (not verified), refresh tokens expire 
 - No trailing slashes on directory paths
 - The root path is `/`
 - Backend adapters handle mapping logical paths to backend-native identifiers (e.g., Google Drive file IDs, S3 object keys)
+- Instead of a path, any tool's `path` (and `aifs_search`'s `scope`) can be an **id anchor**, described below
+
+### ID anchors
+
+An id anchor addresses an item by its backend id, for callers who are granted an item but can't walk to it from the root (a Google Drive member who isn't in the org's Shared Drive, or a file shared from another member's OneDrive). The `id` value is what `aifs_stat` returns.
+
+| Form | Means | gdrive | onedrive |
+|---|---|---|---|
+| `id:{id}` | the item itself | Yes. Drive ids are global, so it resolves wherever the item lives. | Yes. Looked up on the caller's **own** OneDrive (`/me/drive`) first, then the site drive; see below. |
+| `id:{id}/a/b` | a path below that folder | Yes | Yes, same drive as `id:{id}` |
+| `id:{drive_id}:{id}` (`/a/b` optional) | the item on that specific drive (cross-drive) | **No.** The whole `{drive_id}:{id}` is read as one id, so the lookup fails. Use `id:{id}`. | Yes, on that drive, with no fallback |
+
+The `id:` prefix is required. A bare `{id}/child` is read as a literal path. Drive ids and item ids contain no `:` or `/`, so the first `:` after `id:` separates the qualified form from the bare one.
+
+**onedrive bare-id retry on the site drive (2.7.1+, finding 63).** On onedrive a bare `id:{id}` means the caller's own OneDrive, but org items (org-config, collection folders) live in the SharePoint site drive. So when the connection has a configured drive and the item isn't on `/me/drive` (404 or `itemNotFound`), the adapter retries once on the configured site drive and, if it is found there, keeps using the site drive for that id for the rest of the process. It never falls back the other way, never applies to absolute paths or to `id:{drive_id}:{id}`, and never re-points the drive-relative aliases `id:root`, `id:approot` or `id:special/...`, which always mean the caller's own drive. Any other error on the first lookup (auth, throttling) leaves the anchor on `/me/drive`. This is a safety net: callers on onedrive should address org files by path (core `runtime-reference.md` § "Addressing: Owned Content and Sharing").
 
 ## Backend Adapter Contract
 
@@ -993,6 +1102,88 @@ Adapters that ship a partial v2.0 implementation (e.g., not yet implementing `sh
 - `redirect_uri_mismatch` (configuration error) → `{ retryable: false }`
 - Other errors → generic `AuthFailedError` with the backend's error message
 
+## Adapter Packaging
+
+How an adapter repository is laid out and built. This section replaces `agent-index-meta-docs/filesystem-adapter-spec.md` (CI-012). How a built adapter reaches an org and its members, and how it is updated, is distribution, owned by core: `admin-distribution.md` § "Distribution: backend-first (Release C — the current model)" and § "Release procedure (admin-side)". In short: the adapter's maintainers build it (§ "Build") and release it with the bundle committed. An org never rebuilds it: the org admin's setup (create-org) clones the adapter repository at its release tag, verifies the committed bundle's checksum and stages it into the org's bootstrap zip. Members receive it from that zip and through `@ai:update`, never from GitHub.
+
+### Repository layout
+
+```
+agent-index-filesystem-{backend}/
+├── adapter.json              # Adapter manifest (below)
+├── package.json              # Source dependencies and the build scripts
+├── package-lock.json
+├── .gitignore                # node_modules/ (dist/ is committed)
+├── .gitattributes            # LF everywhere; dist/ bundle and wrapper pinned to LF
+├── README.md, LICENSE
+├── scripts/
+│   └── build.js              # npm run build
+├── src/
+│   ├── exec.mjs              # On-demand executor entry point (routeToolCall)
+│   ├── aifs-exec.sh          # Shell wrapper (copied to dist/ by the build)
+│   ├── index.js              # MCP server entry (not used by the on-demand executor)
+│   └── adapters/
+│       ├── {backend}.js      # BackendAdapter implementation
+│       └── {backend}.test.js # node --test
+└── dist/                     # Built output, committed: this is what ships
+    ├── aifs-exec.bundle.js
+    └── aifs-exec.sh
+```
+
+`dist/` is committed and is the distribution artifact; `src/aifs-exec.sh` and `dist/aifs-exec.sh` are identical. `.gitattributes` forces LF so the committed bundle and wrapper keep the bytes their checksum was computed over on every host OS.
+
+### Manifest fields
+
+The full `adapter.json` field list (the excerpt in § "Adapter Manifest" shows the contract fields):
+
+| Field | Description |
+|---|---|
+| `name` | `agent-index-filesystem-{backend_id}` |
+| `display_name` | Human-readable name shown during org setup |
+| `version` | Semver version of the adapter |
+| `description` | Release notes by version, newest first |
+| `author`, `license` | Author or organization; license identifier |
+| `core_version` | Minimum compatible `@agent-index/filesystem` version |
+| `contract_version` | The `BackendAdapter` contract version implemented (§ "Adapter Manifest") |
+| `supported_operations` | Implemented `BackendAdapter` methods |
+| `supported_operations_pending` | Methods declared but not yet implemented (an empty array on current adapters) |
+| `write_supports_if_revision`, `write_supports_content_file`, `write_supports_content_stdin` | Write features (§ "Adapter Manifest") |
+| `backend_id` | Short id used in `agent-index.json` `remote_filesystem.backend`: `gdrive`, `onedrive`, `s3` |
+| `auth_method` | `oauth2`, `aws-credentials`, `aws-sso` or `api-key` |
+| `connection_schema` | The connection fields the admin provides at org setup, each with `type`, `required` and `description`. gdrive: `client_id`, `client_secret`, `drive_id`, `root_folder_id`, `all_members_group`. onedrive: `tenant_id`, `client_id`, `site_id`, `drive_id`, `all_members_group` (public client with PKCE, no secret). |
+| `required_domains` | Hosts the adapter must reach at runtime, used for network-allowlist checks. Wildcards are allowed (onedrive: `*.sharepoint.com`, `*-my.sharepoint.com`). |
+| `required_domains_note` | Optional explanation of the domains (onedrive) |
+| `node_min_version` | Minimum Node.js version (`18.0.0`) |
+| `exec_bundle_entry` | `dist/aifs-exec.bundle.js` |
+| `exec_shell_wrapper` | `dist/aifs-exec.sh` |
+| `bundle_built_at` | ISO 8601 UTC time of the last build; written by the build |
+| `exec_bundle_checksum` | `sha256:<hex>` of `dist/aifs-exec.bundle.js`; written by the build |
+
+### Exec bundle
+
+`dist/aifs-exec.bundle.js` is a single ES-module file built by esbuild from `src/exec.mjs` (`--platform=node --target=node18 --format=esm`, with a `createRequire` banner). It inlines every dependency, including `@agent-index/filesystem` (a `file:../agent-index-filesystem` dependency, so building needs a sibling clone of this repo) and the backend SDK, so at runtime it needs only Node.js: no `npm install`, no package resolution. It runs one `aifs_*` call per process: reads the config, runs the tool, prints JSON to stdout, exits. A path cache persisted in the credential store saves backend lookups between calls.
+
+### Shell wrapper
+
+`aifs-exec.sh <tool_name> '<json_args>'` (or `--help`):
+- **Config:** `AIFS_CONFIG_PATH` if set; otherwise walk up from the wrapper's directory for `agent-index.json`; otherwise the first `$HOME/mnt/*/agent-index.json` (Cowork mounts).
+- **Bundle:** `aifs-exec.bundle.js` in the wrapper's directory (installed layout, `mcp-servers/filesystem/`); otherwise `../dist/aifs-exec.bundle.js` (source repo); otherwise `exec.mjs` in the same directory (development).
+- Neither found: prints `{"error":"CONFIG_ERROR",…}` or `{"error":"EXEC_ERROR",…}` and exits 1. Otherwise it runs `node --no-deprecation --no-warnings` on the bundle and exits with its code.
+
+### Build
+
+`npm run build` (`scripts/build.js`):
+1. `npm run build:exec`: esbuild writes `dist/aifs-exec.bundle.js`.
+2. Computes the bundle's SHA-256.
+3. Copies `src/aifs-exec.sh` to `dist/aifs-exec.sh`.
+4. Stamps `adapter.json`: `bundle_built_at` and `exec_bundle_checksum` (`sha256:<hex>`).
+
+Commit `dist/` and `adapter.json` together. `npm test` runs `node --test` on the adapter tests.
+
+### Integrity rule
+
+`exec_bundle_checksum` must equal the SHA-256 of the committed `dist/aifs-exec.bundle.js`, and the bundle must pass `node --check`. Release tooling enforces it (developer collection: `release-prep` and preflight Check 14), and every install path verifies it before deploying a bundle (create-org, edit-org, `apply-updates` Phase 3): a mismatch aborts; it is never retried or ignored.
+
 ---
 
 ## Contract changelog
@@ -1003,3 +1194,5 @@ Changes to this specification that don't change the contract version. None of th
 - **2026-10-15:** documented `aifs_write_batch` and `aifs_stat_batch` (gdrive 2.9.0+) as optional operations, with their `BackendAdapter` methods `writeBatch` / `statBatch`.
 - **2026-10-15:** the Adapter Manifest example now uses the snake_case keys real `adapter.json` files use, and shows `write_supports_content_file` / `write_supports_content_stdin`.
 - **2026-10-17 (adapters for core 4.0.1):** documented what gdrive 2.11.5 and onedrive 2.7.1 added. `aifs_auth_status` gains the `reason` values `refresh_failed`, `network_error`, `tls_or_proxy_error` and `credential_write_failed` and a `detail` field (gdrive); `NOT_AUTHENTICATED` documents `needs_auth`, `refresh_reason` and `refresh_detail`; `aifs_share` gains the result fields `external` and `invitation_sent` and the error `EXTERNAL_SHARE_BLOCKED` with `reason`, `graph_status`, `graph_code` and `policy_inferred` (onedrive). The batch operations note onedrive 2.6.0+. All additive: callers that ignore the new fields and values behave as before, except that a caller treating every `authenticated: false` as "sign in again" should now check `reason`.
+- **2026-10-20 (CI-014):** documented behaviour the adapters already have. Path Conventions gains § "ID anchors" (`id:{id}`, `id:{id}/rel`, `id:{drive_id}:{id}`, which gdrive doesn't accept) and onedrive 2.7.1's bare-id retry on the site drive (finding 63). `aifs_read` gains the `encoding` input (gdrive 2.11.3), § "Read integrity" (gdrive 2.11.6's size and md5 check, bug 733b) and the `AIFS_READ_UNRELIABLE` error. `aifs_stat` documents `id`, `drive_id` and `web_url` (and onedrive's `is_dir`). `aifs_delete` documents gdrive's Shared Drive trash fallback. New sections for the onedrive-only `aifs_resolve_identity` and `aifs_resolve_site`. No adapter changes.
+- **2026-10-21 (CI-012):** new § "Adapter Packaging" (repository layout, the full manifest field list, the exec bundle, the shell wrapper, the build and the integrity rule), replacing `agent-index-meta-docs/filesystem-adapter-spec.md`; distribution is left to core `admin-distribution.md`. § "aifs_write" notes the onedrive executor has accepted `content_file` / `content_stdin` since 2.0.1. No adapter changes.
