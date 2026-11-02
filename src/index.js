@@ -21,6 +21,31 @@ export { testDomainReachability, testAllDomains } from './network.js';
 export { loadConfig } from './config.js';
 export { createServer, startServer } from './server.js';
 export {
+  resolveOrgMap,
+  saveOrgMap,
+  buildPrefixes,
+  matchOrgPrefix,
+  canonicalizeArgs,
+  touchesMappedPrefix,
+  isProtectedOrgPath,
+  missingSegments,
+  needsOrgMap,
+  pathArgs,
+  mimeTypeFor,
+  IDEMPOTENT_TOOLS,
+  ORG_MAP_FILENAME,
+} from './org-map.js';
+export {
+  readPendingAuth,
+  writePendingAuth,
+  clearPendingAuth,
+  reusedAuthResponse,
+  writeIdentity,
+  readIdentity,
+  memberHash,
+  bootstrapState,
+} from './session-state.js';
+export {
   AifsError,
   FileNotFoundError,
   PathNotFoundError,

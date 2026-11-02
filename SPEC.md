@@ -849,6 +849,31 @@ For Google OAuth apps in "testing" status (not verified), refresh tokens expire 
 - The root path is `/`
 - Backend adapters handle mapping logical paths to backend-native identifiers (e.g., Google Drive file IDs, S3 object keys)
 
+## Org Path Resolution
+
+Shared library 2.3.0 (adapters gdrive 2.12.0, onedrive 2.8.0; core 4.2.0; Core Improvements CI-025). Callers address the org's locations **by plain path on every backend**: `/org-config.json`, `/members-registry.json`, the shared root (`/shared`, or org-config `paths.shared_root` when customised), and `/{collection}` for each installed collection. The executor resolves them for the signed-in member whether or not they can enumerate the drive root.
+
+**The map.** Built only from org-config (read as `id:{org_config_id}` on Google Drive, `/org-config.json` on OneDrive) plus the local `org_config_id`:
+
+| Plain prefix | Id from |
+|---|---|
+| `/org-config.json` | local `agent-index.json` `remote_filesystem.connection.org_config_id` |
+| `/members-registry.json` | org-config `resource_ids.members_registry` |
+| shared root | org-config `resource_ids.shared_root` |
+| `/{name}` | each `installed_collections[]` entry's `folder_id` |
+
+Entries without an id are absent. Each folder is checked to be in the org's drive (`stat` → `drive_id`); one outside it is dropped and reported on stderr. A collection name that collides with the shared root, `org-config.json` or `members-registry.json` is dropped. The first path segment is matched case-insensitively and rewritten to the map's spelling.
+
+**The local file** `{credential_store}/org-map.json` (`schema`, `backend`, `drive_id`, `org_config_id`, `org_config_revision`, `built_at`, `shared_prefix`, `prefixes`, `misses`) is used only when `schema`, `backend`, `drive_id` and `org_config_id` match the install. It is rebuilt when absent; when a call names a top-level entry the map lacks and org-config's revision has changed (a miss is remembered per revision); and when a mapped read, exists, stat, list, search, get_permissions or stat_batch returns not found and org-config's revision has changed, in which case the call is retried once. There is no time-based expiry.
+
+**Applying it.** Before each call that names a plain top-level path, the executor seeds the adapter: Google Drive puts the prefixes in its path cache (a prefix whose id changed first purges every entry cached under it), so resolution walks from the seeded folder and never queries the drive root; OneDrive registers the org's item ids on the site drive, so a bare `id:` for an org item skips the own-drive probe. Results under a plain scope come back as plain paths.
+
+**Never fails a call.** With no usable map (no `org_config_id`, as during create-org before it is stamped; org-config unreadable; offline) the call runs exactly as without the resolver, and stderr says `aifs: org map unavailable (<reason>); paths resolved without it`.
+
+**Unchanged:** `id:` addresses pass through untouched. A top-level name that isn't in the map (for example `/CLAUDE.md`) resolves as before, through the adapter's in-drive lookup. `aifs_delete` on a mapped prefix itself fails with `PROTECTED_ORG_PATH`.
+
+**Session state (same release).** `aifs_auth_status` adds `bootstrap` (`ready` | `needs_auth` | `needs_setup`), `member_hash` and, when not ready, `bootstrap_reason`, computed from local files; the signed-in email is saved to `{credential_store}/identity.json`. `aifs_authenticate` with `action: "start"` returns the sign-in already in progress (`reused: true`) when one under 10 minutes old exists (`{credential_store}/pending-auth.json`); `force: true` starts over.
+
 ## Backend Adapter Contract
 
 Each backend adapter must implement the following interface. **Contract version 2.0** adds five access-control methods, a `search` method, and an `ifRevision` parameter to `write`. Adapters declare which contract version they implement via the `contract_version` field in their `adapter.json` (§ "Adapter Manifest").
@@ -999,6 +1024,7 @@ Adapters that ship a partial v2.0 implementation (e.g., not yet implementing `sh
 
 Changes to this specification that don't change the contract version. None of them requires an adapter to change.
 
+- **2026-10-28 (shared library 2.3.0, adapters gdrive 2.12.0 / onedrive 2.8.0, CI-025):** new § "Org Path Resolution": plain paths for org locations on every backend, resolved by the executor from org-config; `aifs_auth_status` `bootstrap` / `member_hash`; `aifs_authenticate` start reuse and `force`; `aifs_delete` `PROTECTED_ORG_PATH`; OneDrive reads check the body size (`AIFS_READ_UNRELIABLE`, `reason: size_mismatch`). The executor does this, so the `BackendAdapter` contract is unchanged except for the optional `seedOrgPrefixes(prefixes)` method.
 - **2026-10-15:** `aifs_write`'s input schema changed from `"required": ["path", "content"]` to `path` plus exactly one of `content`, `content_file` or `content_stdin` (`oneOf`). This is a schema change, though it describes behaviour every gdrive executor since 2.6.0 already had: the executor resolves the extra sources before calling `write`, so the `BackendAdapter` contract is unchanged. (First published in agent-index-filesystem#1, 2026-09-30.)
 - **2026-10-15:** documented `aifs_write_batch` and `aifs_stat_batch` (gdrive 2.9.0+) as optional operations, with their `BackendAdapter` methods `writeBatch` / `statBatch`.
 - **2026-10-15:** the Adapter Manifest example now uses the snake_case keys real `adapter.json` files use, and shows `write_supports_content_file` / `write_supports_content_stdin`.
