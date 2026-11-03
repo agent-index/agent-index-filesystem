@@ -1148,8 +1148,8 @@ The full `adapter.json` field list (the excerpt in § "Adapter Manifest" shows t
 | `supported_operations` | Implemented `BackendAdapter` methods |
 | `supported_operations_pending` | Methods declared but not yet implemented (an empty array on current adapters) |
 | `write_supports_if_revision`, `write_supports_content_file`, `write_supports_content_stdin` | Write features (§ "Adapter Manifest") |
-| `backend_id` | Short id used in `agent-index.json` `remote_filesystem.backend`: `gdrive`, `onedrive`, `s3` |
-| `auth_method` | `oauth2`, `aws-credentials`, `aws-sso` or `api-key` |
+| `backend_id` | Short id used in `agent-index.json` `remote_filesystem.backend`: `gdrive` or `onedrive` |
+| `auth_method` | `oauth2` (both current adapters) |
 | `connection_schema` | The connection fields the admin provides at org setup, each with `type`, `required` and `description`. gdrive: `client_id`, `client_secret`, `drive_id`, `root_folder_id`, `all_members_group`. onedrive: `tenant_id`, `client_id`, `site_id`, `drive_id`, `all_members_group` (public client with PKCE, no secret). |
 | `required_domains` | Hosts the adapter must reach at runtime, used for network-allowlist checks. Wildcards are allowed (onedrive: `*.sharepoint.com`, `*-my.sharepoint.com`). |
 | `required_domains_note` | Optional explanation of the domains (onedrive) |
@@ -1182,7 +1182,7 @@ Commit `dist/` and `adapter.json` together. `npm test` runs `node --test` on the
 
 ### Integrity rule
 
-`exec_bundle_checksum` must equal the SHA-256 of the committed `dist/aifs-exec.bundle.js`, and the bundle must pass `node --check`. Release tooling enforces it (developer collection: `release-prep` and preflight Check 14), and every install path verifies it before deploying a bundle (create-org, edit-org, `apply-updates` Phase 3): a mismatch aborts; it is never retried or ignored.
+`exec_bundle_checksum` must equal `sha256:` followed by the SHA-256 of the committed `dist/aifs-exec.bundle.js` as Git stores it: the git-blob (LF) bytes, `git show HEAD:dist/aifs-exec.bundle.js`. Never hash a working-tree copy: a Windows checkout converts LF to CRLF and changes the hash (create-org, ms-install-6). The bundle must also pass `node --check`. Release tooling enforces it (developer collection: `release-prep` and preflight Check 14), and every install path verifies it before deploying a bundle (create-org, edit-org, `apply-updates` Phase 3): a mismatch aborts; it is never retried or ignored.
 
 ---
 
