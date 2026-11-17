@@ -12,7 +12,7 @@
  * Everything here is best-effort and never throws to the caller.
  */
 import { readFile, writeFile, rename, mkdir, unlink } from 'node:fs/promises';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { createHash } from 'node:crypto';
 
@@ -87,11 +87,33 @@ export function memberHash(email, length = 16) {
 
 // ─── Bootstrap state ──────────────────────────────────────────────────
 
+/** Hashes of the local member workspaces (members/{hash}/member-index.json), sorted. */
+export function localWorkspaces(installDir, membersRoot = 'members') {
+  try {
+    const root = join(installDir, membersRoot);
+    if (!existsSync(root)) return [];
+    return readdirSync(root, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && existsSync(join(root, e.name, 'member-index.json')))
+      .map((e) => e.name)
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
 /**
  * ready | needs_auth | needs_setup, from local state only.
  *   configPath    path to agent-index.json (AIFS_CONFIG_PATH)
  *   authenticated whether the adapter holds a usable credential
- *   email         the signed-in member's email (from the auth status or identity.json)
+ *   email         the signed-in account (from the auth status or identity.json)
+ *
+ * The signed-in account is the backend's (a Microsoft UPN, a Google account), which
+ * need not be the member's agent-index email, so its hash can miss an existing
+ * workspace (finding 108). needs_setup therefore means "no member workspace on this
+ * install at all", the same rule as CLAUDE.md's fallback. When the account's hash
+ * misses: one local workspace -> ready with that workspace (identity_match false);
+ * several -> ready with member_hash null, to be resolved from the member's
+ * agent-index email (CLAUDE.md § Identity Resolution).
  */
 export function bootstrapState({ configPath, authenticated, email }) {
   try {
@@ -107,11 +129,25 @@ export function bootstrapState({ configPath, authenticated, email }) {
     if (!email || email === 'unknown') return { bootstrap: 'needs_auth', reason: 'identity_unknown' };
     const length = Number(cfg?.identity_resolution?.hash_length) || 16;
     const hash = memberHash(email, length);
-    const memberIndex = join(dirname(configPath), 'members', hash, 'member-index.json');
-    if (!existsSync(memberIndex)) {
+    const installDir = dirname(configPath);
+    const membersRoot = (typeof cfg?.local?.members_root === 'string' && cfg.local.members_root) || 'members';
+    if (existsSync(join(installDir, membersRoot, hash, 'member-index.json'))) {
+      return { bootstrap: 'ready', member_hash: hash };
+    }
+    const workspaces = localWorkspaces(installDir, membersRoot);
+    if (workspaces.length === 0) {
       return { bootstrap: 'needs_setup', reason: 'no_member_workspace', member_hash: hash };
     }
-    return { bootstrap: 'ready', member_hash: hash };
+    if (workspaces.length === 1) {
+      return {
+        bootstrap: 'ready', member_hash: workspaces[0], identity_match: false,
+        reason: 'signed_in_account_differs', signed_in_hash: hash,
+      };
+    }
+    return {
+      bootstrap: 'ready', member_hash: null, identity_match: false,
+      reason: 'several_workspaces', signed_in_hash: hash, local_member_hashes: workspaces,
+    };
   } catch (err) {
     return { bootstrap: 'needs_setup', reason: `check_failed:${err?.message || 'error'}` };
   }
