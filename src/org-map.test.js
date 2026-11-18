@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import {
   buildPrefixes, matchOrgPrefix, canonicalizeArgs, pathArgs, needsOrgMap,
   touchesMappedPrefix, isProtectedOrgPath, missingSegments, resolveOrgMap,
-  ORG_MAP_FILENAME, mimeTypeFor,
+  ORG_MAP_FILENAME, mimeTypeFor, hasBareIdAnchor,
 } from './org-map.js';
 
 const ORG = {
@@ -240,6 +240,29 @@ test('OneDrive: org-config is read by path; no org_config_id needed', async () =
   const r = await resolveOrgMap({ config: { backend: 'onedrive', connection: { drive_id: 'D1' } }, adapter: a, credentialStore: dir });
   assert.ok(r.map);
   assert.ok(a.calls.read.includes('/org-config.json'));
+  // The stat returned no id: nothing to record.
   assert.equal(r.map.prefixes['/org-config.json'], undefined);
   assert.equal(r.map.prefixes['/shared'].id, 'SR');
+});
+
+test('OneDrive: the org-config item id from the stat is recorded (B14)', async () => {
+  const dir = await store();
+  const a = fakeAdapter();
+  const stat = a.stat.bind(a);
+  a.stat = async (p) => (p === '/org-config.json' ? { revision: 'r1', id: 'OCITEM' } : stat(p));
+  const r = await resolveOrgMap({ config: { backend: 'onedrive', connection: { drive_id: 'D1' } }, adapter: a, credentialStore: dir });
+  assert.deepEqual(r.map.prefixes['/org-config.json'], { id: 'OCITEM', kind: 'file' });
+  assert.equal(r.map.misses['org-config.json'], undefined);
+});
+
+test('hasBareIdAnchor: bare ids yes; drive-qualified, aliases and plain paths no', () => {
+  assert.equal(hasBareIdAnchor('aifs_read', { path: 'id:01ABC' }), true);
+  assert.equal(hasBareIdAnchor('aifs_read', { path: 'id:01ABC/api/x.md' }), true);
+  assert.equal(hasBareIdAnchor('aifs_copy', { source: '/shared/a', destination: 'id:01ABC/b' }), true);
+  assert.equal(hasBareIdAnchor('aifs_stat_batch', { paths: ['/x', 'id:01ABC'] }), true);
+  assert.equal(hasBareIdAnchor('aifs_read', { path: 'id:b!DRIVE:01ABC' }), false);
+  assert.equal(hasBareIdAnchor('aifs_read', { path: 'id:root/x' }), false);
+  assert.equal(hasBareIdAnchor('aifs_read', { path: 'id:approot' }), false);
+  assert.equal(hasBareIdAnchor('aifs_read', { path: '/shared/x' }), false);
+  assert.equal(hasBareIdAnchor('aifs_auth_status', {}), false);
 });

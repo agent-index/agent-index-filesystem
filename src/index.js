@@ -30,6 +30,7 @@ export {
   isProtectedOrgPath,
   missingSegments,
   needsOrgMap,
+  hasBareIdAnchor,
   pathArgs,
   mimeTypeFor,
   IDEMPOTENT_TOOLS,

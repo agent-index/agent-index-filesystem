@@ -78,6 +78,18 @@ export function needsOrgMap(toolName, args) {
   return pathArgs(toolName, args).some((p) => firstSegment(p) !== null);
 }
 
+/**
+ * True when any path argument is a bare id anchor (id:{item}[/rel], not drive-qualified
+ * and not a drive alias such as id:root). On OneDrive the map's ids let such a call go
+ * straight to the org's site drive instead of probing the member's own drive (B14).
+ */
+export function hasBareIdAnchor(toolName, args) {
+  return pathArgs(toolName, args).some((p) => {
+    const m = /^id:([^/:]+)(\/|$)/.exec(p);
+    return !!m && !/^(root|approot|special)$/i.test(m[1]);
+  });
+}
+
 // ─── Building the map ─────────────────────────────────────────────────
 
 function sharedPrefixFrom(orgConfig) {
@@ -228,9 +240,13 @@ function orgConfigAddress(config) {
   return '/org-config.json';
 }
 
-async function orgConfigRevision(adapter, address) {
+async function orgConfigStat(adapter, address) {
   const st = await adapter.stat(address);
-  return st?.revision ?? null;
+  return { revision: st?.revision ?? null, id: st?.id ?? null };
+}
+
+async function orgConfigRevision(adapter, address) {
+  return (await orgConfigStat(adapter, address)).revision;
 }
 
 /**
@@ -288,7 +304,8 @@ async function build(ctx) {
   const address = orgConfigAddress(config);
   if (!address) return { map: null, reason: 'no_org_config_id' };
   let revision = null;
-  try { revision = await orgConfigRevision(adapter, address); } catch (err) {
+  let orgConfigItemId = null;
+  try { ({ revision, id: orgConfigItemId } = await orgConfigStat(adapter, address)); } catch (err) {
     return { map: null, reason: `org_config_unreadable:${err?.code || err?.message || 'error'}` };
   }
   let orgConfig;
@@ -299,7 +316,9 @@ async function build(ctx) {
     return { map: null, reason: `org_config_unreadable:${err?.code || 'parse_error'}` };
   }
   const id = identity(config);
-  const { prefixes, shared_prefix, dropped } = buildPrefixes(orgConfig, { orgConfigId: id.org_config_id });
+  // OneDrive has no local org_config_id: record the item id org-config was read from,
+  // so a bare id:{org_config_id} also goes straight to the site drive (B14).
+  const { prefixes, shared_prefix, dropped } = buildPrefixes(orgConfig, { orgConfigId: id.org_config_id || orgConfigItemId });
   for (const d of dropped) warn(`aifs: org map: dropped collection "${d.name}" (${d.reason})`);
   const { prefixes: validated, complete } = await validatePrefixes(adapter, config, prefixes, dropped, warn);
   const map = {
@@ -327,7 +346,7 @@ async function build(ctx) {
  *   'not-found'      — a mapped read came back not-found: one org-config stat;
  *                      rebuild (and report rebuilt:true) only if the revision changed.
  *
- * Returns { map | null, reason | null, rebuilt: boolean }.
+ * Returns { map | null, reason | null, rebuilt: boolean, persist?: boolean (when rebuilt) }.
  */
 export async function resolveOrgMap({ config, adapter, credentialStore, mode = 'normal', segment = null, warn = () => {} }) {
   const ctx = { config, adapter, warn };
@@ -340,7 +359,7 @@ export async function resolveOrgMap({ config, adapter, credentialStore, mode = '
         r.map.misses[segment.toLowerCase()] = r.map.org_config_revision;
       }
       if (r.map && r.persist) await saveOrgMap(credentialStore, r.map);
-      return { map: r.map, reason: r.reason, rebuilt: !!r.map };
+      return { map: r.map, reason: r.reason, rebuilt: !!r.map, persist: !!(r.map && r.persist) };
     }
 
     if (mode === 'normal') return { map: cached, reason: null, rebuilt: false };
@@ -364,7 +383,7 @@ export async function resolveOrgMap({ config, adapter, credentialStore, mode = '
           r.map.misses[segment.toLowerCase()] = r.map.org_config_revision;
         }
         if (r.persist) await saveOrgMap(credentialStore, r.map);
-        return { map: r.map, reason: null, rebuilt: true };
+        return { map: r.map, reason: null, rebuilt: true, persist: !!r.persist };
       }
       return { map: cached, reason: null, rebuilt: false };
     }
