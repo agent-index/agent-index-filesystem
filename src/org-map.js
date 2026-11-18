@@ -236,8 +236,10 @@ async function orgConfigRevision(adapter, address) {
 /**
  * Validate folder entries: each must live in the org's drive (technical design §2.3).
  * Entries that fail the check, or can't be stat'ed, are dropped (the path then
- * resolves as it did before 2.3.0).
+ * resolves as it did before 2.3.0). The map is saved unless a drop was transient.
  */
+const NOT_VISIBLE_CODES = new Set(['FILE_NOT_FOUND', 'PATH_NOT_FOUND', 'ACCESS_DENIED']);
+
 async function validatePrefixes(adapter, config, prefixes, dropped, warn) {
   const orgDrive = config?.connection?.drive_id || null;
   if (!orgDrive || typeof adapter.stat !== 'function') return { prefixes, complete: true };
@@ -262,7 +264,13 @@ async function validatePrefixes(adapter, config, prefixes, dropped, warn) {
         if (d !== null && sameDrive(d)) return { k, ok: true };
         return { k, ok: false, reason: 'outside_org_drive', detail: d };
       } catch (err) {
-        return { k, ok: false, reason: 'unverified', detail: err?.code || 'stat_failed', transient: true };
+        // Not found / no access is a lasting answer for this member (e.g. a collection
+        // that is only "downloaded", or one shared with admins only): drop it and keep
+        // the map. Anything else (rate limit, network) may pass: don't save the map,
+        // so the next call verifies again (G1, CI-025 Phase B).
+        const code = err?.code || 'stat_failed';
+        if (NOT_VISIBLE_CODES.has(code)) return { k, ok: false, reason: 'not_visible', detail: code };
+        return { k, ok: false, reason: 'unverified', detail: code, transient: true };
       }
     })));
   }

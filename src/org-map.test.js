@@ -22,14 +22,14 @@ const ORG = {
 
 const gconfig = (over = {}) => ({ backend: 'gdrive', connection: { drive_id: 'D1', org_config_id: 'OC', ...over } });
 
-function fakeAdapter({ org = ORG, revision = 'r1', drives = {}, failStat = new Set(), failRead = false } = {}) {
+function fakeAdapter({ org = ORG, revision = 'r1', drives = {}, failStat = new Set(), failCode = 'BACKEND_ERROR', failRead = false } = {}) {
   const calls = { stat: [], read: [] };
   return {
     calls,
     org, revision,
     async stat(p) {
       calls.stat.push(p);
-      if (failStat.has(p)) throw Object.assign(new Error('denied'), { code: 'ACCESS_DENIED' });
+      if (failStat.has(p)) throw Object.assign(new Error('stat failed'), { code: failCode });
       if (p === 'id:OC' || p === '/org-config.json') return { revision: this.revision };
       const id = p.replace(/^id:/, '');
       return { drive_id: drives[id] ?? 'D1' };
@@ -144,6 +144,24 @@ test('resolveOrgMap: an unverifiable folder is dropped for this call and the map
   const r2 = await resolveOrgMap({ config: gconfig(), adapter: fakeAdapter(), credentialStore: dir });
   assert.equal(r2.rebuilt, true);
   assert.ok(r2.map.prefixes['/agent-index-core']);
+});
+
+test('resolveOrgMap: a folder the member cannot see is dropped and the map IS saved (G1)', async () => {
+  for (const code of ['FILE_NOT_FOUND', 'PATH_NOT_FOUND', 'ACCESS_DENIED']) {
+    const dir = await store();
+    const msgs = [];
+    const a = fakeAdapter({ failStat: new Set(['id:CORE']), failCode: code });
+    const r = await resolveOrgMap({ config: gconfig(), adapter: a, credentialStore: dir, warn: (m) => msgs.push(m) });
+    assert.equal(r.map.prefixes['/agent-index-core'], undefined, code);
+    assert.ok(r.map.prefixes['/projects'], code);
+    assert.ok(msgs.some((m) => m.includes('/agent-index-core') && m.includes('not_visible')), code);
+    // Saved: the next call is served from the local file with no remote calls.
+    const b = fakeAdapter({ failStat: new Set(['id:CORE']), failCode: code });
+    const r2 = await resolveOrgMap({ config: gconfig(), adapter: b, credentialStore: dir });
+    assert.notEqual(r2.rebuilt, true, code);
+    assert.equal(b.calls.stat.length + b.calls.read.length, 0, code);
+    assert.equal(r2.map.prefixes['/agent-index-core'], undefined, code);
+  }
 });
 
 test('resolveOrgMap: OneDrive checks folders by drive-qualified id, drive ids compared case-insensitively', async () => {
