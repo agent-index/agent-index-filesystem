@@ -1,7 +1,7 @@
 {
   "name": "@agent-index/filesystem",
-  "version": "2.2.1",
-  "description": "Agent Index Filesystem MCP Server \u2014 core framework, tool definitions, and adapter interface",
+  "version": "2.3.0",
+  "description": "Agent Index Filesystem MCP Server — core framework, tool definitions, and adapter interface",
   "type": "module",
   "main": "src/index.js",
   "exports": {
@@ -10,10 +10,12 @@
     "./config": "./src/config.js",
     "./errors": "./src/errors.js",
     "./env": "./src/env.js",
-    "./network": "./src/network.js"
+    "./network": "./src/network.js",
+    "./org-map": "./src/org-map.js",
+    "./session-state": "./src/session-state.js"
   },
   "scripts": {
-    "test": "node --test src/**/*.test.js"
+    "test": "node --test src/*.test.js"
   },
   "keywords": [
     "agent-index",
